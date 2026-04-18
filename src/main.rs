@@ -100,11 +100,13 @@ fn main() -> Result<()> {
                 &client,
                 &mut state,
                 &media_dir,
-                cmd.tag.as_deref(),
-                cmd.note.as_deref(),
-                cmd.dry_run,
-                cmd.force,
-                cmd.verbose,
+                &sync::SyncOptions {
+                    tag_filter: cmd.tag.as_deref(),
+                    note_filter: cmd.note.as_deref(),
+                    dry_run: cmd.dry_run,
+                    force: cmd.force,
+                    verbose: cmd.verbose,
+                },
             )?;
 
             if cmd.dry_run {

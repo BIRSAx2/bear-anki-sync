@@ -17,21 +17,25 @@ pub struct SyncReport {
     pub skipped: usize,
 }
 
+pub struct SyncOptions<'a> {
+    pub tag_filter: Option<&'a str>,
+    pub note_filter: Option<&'a str>,
+    pub dry_run: bool,
+    pub force: bool,
+    pub verbose: bool,
+}
+
 pub fn sync(
     db: &BearDb,
     client: &AnkiClient,
     state: &mut SyncState,
     media_dir: &Path,
-    tag_filter: Option<&str>,
-    note_filter: Option<&str>,
-    dry_run: bool,
-    force: bool,
-    verbose: bool,
+    opts: &SyncOptions<'_>,
 ) -> Result<SyncReport> {
-    let mut notes = db.export_notes(tag_filter)?;
+    let mut notes = db.export_notes(opts.tag_filter)?;
 
     // Filter to a specific note by title if requested
-    if let Some(title) = note_filter {
+    if let Some(title) = opts.note_filter {
         let title_lower = title.to_lowercase();
         notes.retain(|n| n.title.to_lowercase().contains(&title_lower));
         if notes.is_empty() {
@@ -94,15 +98,15 @@ pub fn sync(
 
         if let Some(anki_id) = state.get(note_id, fp) {
             // Exists — skip if content unchanged (unless --force)
-            if !force && state.get_hash(note_id, fp) == Some(hash.as_str()) {
-                if verbose {
+            if !opts.force && state.get_hash(note_id, fp) == Some(hash.as_str()) {
+                if opts.verbose {
                     println!("[skip]   {} — {}", card.deck, card_preview(card));
                 }
                 report.skipped += 1;
                 continue;
             }
             let anki_note = build_anki_note(card, image_files, bear_tags, client)?;
-            if dry_run {
+            if opts.dry_run {
                 println!(
                     "[dry-run] would update Anki note {anki_id} (deck: {})",
                     card.deck
@@ -124,7 +128,7 @@ pub fn sync(
                     }
                     Err(err) => return Err(err),
                 }
-                if verbose {
+                if opts.verbose {
                     println!("[update] {} — {}", card.deck, card_preview(card));
                 }
             }
@@ -132,7 +136,7 @@ pub fn sync(
         } else {
             // New card
             let anki_note = build_anki_note(card, image_files, bear_tags, client)?;
-            if dry_run {
+            if opts.dry_run {
                 println!(
                     "[dry-run] would add card to deck {:?} ({})",
                     card.deck,
@@ -143,7 +147,7 @@ pub fn sync(
                 let anki_id = client.add_note(&anki_note)?;
                 state.insert(note_id, fp, anki_id);
                 state.set_hash(note_id, fp, hash);
-                if verbose {
+                if opts.verbose {
                     println!("[add]    {} — {}", card.deck, card_preview(card));
                 }
             }
@@ -155,7 +159,7 @@ pub fn sync(
     let stale: Vec<(String, String, u64)> = state
         .all_keys()
         .filter(|(note_id, fp, _)| {
-            if note_filter.is_some() && !processed_note_ids.contains(*note_id) {
+            if opts.note_filter.is_some() && !processed_note_ids.contains(*note_id) {
                 return false;
             }
             !current.contains_key(&(note_id.to_string(), fp.to_string()))
@@ -165,7 +169,7 @@ pub fn sync(
 
     if !stale.is_empty() {
         let ids: Vec<u64> = stale.iter().map(|(_, _, id)| *id).collect();
-        if dry_run {
+        if opts.dry_run {
             println!("[dry-run] would delete {} Anki note(s)", ids.len());
         } else {
             client.delete_notes(&ids)?;
@@ -176,7 +180,7 @@ pub fn sync(
         report.deleted += stale.len();
     }
 
-    if !dry_run {
+    if !opts.dry_run {
         state.save()?;
     }
 

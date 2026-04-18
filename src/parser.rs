@@ -99,7 +99,7 @@ pub fn parse_cards(note: &ExportNote) -> Vec<Card> {
     cards
 }
 
-fn detect_callout<'a>(line: &'a str) -> Option<(String, &'a str)> {
+fn detect_callout(line: &str) -> Option<(String, &str)> {
     for &ct in CALLOUT_TYPES {
         let prefix = format!("> [!{ct}]");
         if let Some(rest) = line.strip_prefix(prefix.as_str()) {
