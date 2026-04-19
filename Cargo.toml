@@ -13,7 +13,7 @@ categories = ["command-line-utilities"]
 include = ["src/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
 
 [features]
-macos-app = ["dep:tray-icon", "dep:muda", "dep:winit", "dep:notify-rust"]
+macos-app = ["dep:tray-icon", "dep:muda", "dep:winit"]
 
 [[bin]]
 name = "bear-anki"
@@ -38,4 +38,3 @@ toml           = "0.8"
 tray-icon      = { version = "0.19", optional = true }
 muda           = { version = "0.15", optional = true }
 winit          = { version = "0.30", optional = true }
-notify-rust    = { version = "4",    optional = true }

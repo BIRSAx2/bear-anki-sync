@@ -1,5 +1,5 @@
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bear_anki_sync::anki::AnkiClient;
 use bear_anki_sync::config::Config;
@@ -17,7 +17,7 @@ use winit::window::WindowId;
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
-// ── Custom event sent from background sync thread ─────────────────────────────
+// ── Custom event from background sync thread ──────────────────────────────────
 
 #[derive(Debug)]
 enum AppEvent {
@@ -27,11 +27,12 @@ enum AppEvent {
 // ── Application state ─────────────────────────────────────────────────────────
 
 struct MenuBarApp {
-    // Kept alive for as long as the app runs; dropping it removes the tray icon.
     _tray: Option<TrayIcon>,
 
     sync_item: MenuItem,
-    status_item: MenuItem,
+    force_item: MenuItem,
+    last_sync_item: MenuItem, // informational, always disabled
+    card_count_item: MenuItem, // informational, always disabled
     quit_item: MenuItem,
 
     proxy: EventLoopProxy<AppEvent>,
@@ -41,7 +42,7 @@ struct MenuBarApp {
 
     is_syncing: bool,
     card_count: usize,
-    last_sync: Option<(Instant, bool)>, // (time, success)
+    last_sync_at: Option<Instant>,
 }
 
 impl MenuBarApp {
@@ -56,13 +57,17 @@ impl MenuBarApp {
             .unwrap_or(0);
 
         let sync_item = MenuItem::new("Sync Now", true, None);
-        let status_item = MenuItem::new(format!("{card_count} card(s) tracked"), false, None);
+        let force_item = MenuItem::new("Force Sync (re-sync all)", true, None);
+        let last_sync_item = MenuItem::new("Last sync: never", false, None);
+        let card_count_item = MenuItem::new(card_count_label(card_count), false, None);
         let quit_item = MenuItem::new("Quit Bear-Anki", true, None);
 
         Self {
             _tray: None,
             sync_item,
-            status_item,
+            force_item,
+            last_sync_item,
+            card_count_item,
             quit_item,
             proxy,
             db_path_override,
@@ -70,15 +75,18 @@ impl MenuBarApp {
             cfg,
             is_syncing: false,
             card_count,
-            last_sync: None,
+            last_sync_at: None,
         }
     }
 
     fn build_tray(&self) -> TrayIcon {
         let menu = Menu::new();
         menu.append(&self.sync_item).unwrap();
+        menu.append(&self.force_item).unwrap();
         menu.append(&PredefinedMenuItem::separator()).unwrap();
-        menu.append(&self.status_item).unwrap();
+        menu.append(&self.last_sync_item).unwrap();
+        menu.append(&PredefinedMenuItem::separator()).unwrap();
+        menu.append(&self.card_count_item).unwrap();
         menu.append(&PredefinedMenuItem::separator()).unwrap();
         menu.append(&self.quit_item).unwrap();
 
@@ -90,14 +98,15 @@ impl MenuBarApp {
             .expect("failed to create tray icon")
     }
 
-    fn start_sync(&mut self) {
+    fn start_sync(&mut self, force: bool) {
         if self.is_syncing {
             return;
         }
         self.is_syncing = true;
         self.sync_item.set_text("Syncing…");
         self.sync_item.set_enabled(false);
-        self.status_item.set_text("Syncing…");
+        self.force_item.set_enabled(false);
+        self.last_sync_item.set_text("Syncing…");
 
         let proxy = self.proxy.clone();
         let db_path_override = self.db_path_override.clone();
@@ -105,7 +114,7 @@ impl MenuBarApp {
         let cfg = self.cfg.clone();
 
         thread::spawn(move || {
-            let result = do_sync(db_path_override, &anki_url, &cfg);
+            let result = do_sync(db_path_override, &anki_url, &cfg, force);
             let _ = proxy.send_event(AppEvent::SyncDone(result));
         });
     }
@@ -114,33 +123,30 @@ impl MenuBarApp {
         self.is_syncing = false;
         self.sync_item.set_text("Sync Now");
         self.sync_item.set_enabled(true);
+        self.force_item.set_enabled(true);
+        self.last_sync_at = Some(Instant::now());
 
-        // Reload card count from updated state
+        // Reload card count from the updated state file.
         self.card_count = SyncState::load()
             .map(|s| s.all_keys().count())
             .unwrap_or(self.card_count);
+        self.card_count_item
+            .set_text(card_count_label(self.card_count));
 
-        let success = result.is_ok();
-        self.last_sync = Some((Instant::now(), success));
-        self.status_item
-            .set_text(format!("{} card(s) tracked", self.card_count));
-
-        // macOS notification
         match result {
-            Ok(r) => {
-                let _ = notify_rust::Notification::new()
-                    .summary("Bear-Anki Sync")
-                    .body(&format!(
-                        "{} added · {} updated · {} deleted · {} unchanged",
-                        r.added, r.updated, r.deleted, r.skipped
-                    ))
-                    .show();
+            Ok(ref r) => {
+                let detail = format!(
+                    "+{} ~{} −{} ={} (added · updated · deleted · unchanged)",
+                    r.added, r.updated, r.deleted, r.skipped
+                );
+                self.last_sync_item
+                    .set_text(format!("Last sync: {detail}"));
+                notify("Bear-Anki Sync", &detail);
             }
-            Err(msg) => {
-                let _ = notify_rust::Notification::new()
-                    .summary("Bear-Anki Sync Failed")
-                    .body(&msg)
-                    .show();
+            Err(ref msg) => {
+                self.last_sync_item
+                    .set_text(format!("Last sync failed: {msg}"));
+                notify("Bear-Anki Sync Failed", msg);
             }
         }
     }
@@ -150,7 +156,6 @@ impl MenuBarApp {
 
 impl ApplicationHandler<AppEvent> for MenuBarApp {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
-        // Called once on macOS when the app finishes launching.
         if self._tray.is_none() {
             self._tray = Some(self.build_tray());
         }
@@ -162,7 +167,6 @@ impl ApplicationHandler<AppEvent> for MenuBarApp {
         _id: WindowId,
         _event: WindowEvent,
     ) {
-        // No windows in a menu bar app — nothing to handle.
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
@@ -172,32 +176,31 @@ impl ApplicationHandler<AppEvent> for MenuBarApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Poll mode: check for menu/tray events on every iteration.
         event_loop.set_control_flow(ControlFlow::Poll);
 
-        // Drain tray-icon events (menu opens automatically on macOS click).
         while TrayIconEvent::receiver().try_recv().is_ok() {}
 
-        // Handle menu item clicks.
         while let Ok(event) = MenuEvent::receiver().try_recv() {
             if event.id == *self.sync_item.id() {
-                self.start_sync();
+                self.start_sync(false);
+            } else if event.id == *self.force_item.id() {
+                self.start_sync(true);
             } else if event.id == *self.quit_item.id() {
                 event_loop.exit();
             }
         }
 
-        // Small sleep to avoid a busy-loop while idle.
-        thread::sleep(std::time::Duration::from_millis(20));
+        thread::sleep(Duration::from_millis(20));
     }
 }
 
-// ── Sync logic (runs in a background thread) ──────────────────────────────────
+// ── Sync (background thread) ──────────────────────────────────────────────────
 
 fn do_sync(
     db_path_override: Option<String>,
     anki_url: &str,
     cfg: &Config,
+    force: bool,
 ) -> Result<SyncReport, String> {
     let db_path = match db_path_override {
         Some(p) => std::path::PathBuf::from(p),
@@ -224,7 +227,7 @@ fn do_sync(
             tag_filter: None,
             note_filter: None,
             dry_run: false,
-            force: false,
+            force,
             verbose: false,
             config: cfg,
         },
@@ -232,11 +235,29 @@ fn do_sync(
     .map_err(|e| e.to_string())
 }
 
+// ── Notifications (via osascript — works without a bundle ID) ─────────────────
+
+fn notify(title: &str, body: &str) {
+    let title = title.replace('\\', "\\\\").replace('"', "\\\"");
+    let body = body.replace('\\', "\\\\").replace('"', "\\\"");
+    let script = format!(r#"display notification "{body}" with title "{title}""#);
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .spawn();
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn card_count_label(n: usize) -> String {
+    format!("{n} card(s) tracked")
+}
+
 // ── Tray icon ─────────────────────────────────────────────────────────────────
 
-/// Programmatic 22×22 "card" icon for the macOS menu bar.
-/// Black pixels on transparent background — works as a template image in both
-/// light and dark menu bars.
+/// 22×22 "card" icon for the macOS menu bar.
+/// Black pixels on transparent background — renders correctly in both
+/// light and dark menu bar appearances.
 fn card_icon() -> tray_icon::Icon {
     const S: u32 = 22;
     let mut rgba = vec![0u8; (S * S * 4) as usize];
@@ -251,14 +272,14 @@ fn card_icon() -> tray_icon::Icon {
         }
     };
 
-    // Outer border of the card (4 px inset)
+    // Card border (4 px inset)
     for n in 4..=17u32 {
-        px(n, 4);  // top edge
-        px(n, 17); // bottom edge
-        px(4, n);  // left edge
-        px(17, n); // right edge
+        px(n, 4);
+        px(n, 17);
+        px(4, n);
+        px(17, n);
     }
-    // Two horizontal "text lines" inside the card
+    // Two horizontal "text lines"
     for n in 7..=15u32 {
         px(n, 9);
         px(n, 13);
@@ -279,7 +300,6 @@ fn main() {
 
     let mut builder = EventLoop::<AppEvent>::with_user_event();
     #[cfg(target_os = "macos")]
-    // Accessory policy: the app lives only in the menu bar, no Dock icon.
     builder.with_activation_policy(ActivationPolicy::Accessory);
 
     let event_loop = builder.build().expect("failed to create event loop");
