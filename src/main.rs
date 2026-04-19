@@ -4,8 +4,6 @@ use bear_anki_sync::config::Config;
 use bear_anki_sync::parser::parse_cards;
 use bear_anki_sync::state::SyncState;
 use bear_anki_sync::sync;
-use bear_cli::config::resolve_database_path;
-use bear_cli::db::BearDb;
 use clap::{Args, Parser, Subcommand};
 
 const DEFAULT_ANKI_URL: &str = "http://127.0.0.1:8765";
@@ -17,9 +15,6 @@ const DEFAULT_ANKI_URL: &str = "http://127.0.0.1:8765";
     about = "Sync Bear.app notes to Anki via AnkiConnect"
 )]
 struct Cli {
-    #[arg(long, global = true, env = "BEAR_DATABASE")]
-    database: Option<String>,
-
     #[arg(long, global = true, env = "ANKI_URL")]
     anki_url: Option<String>,
 
@@ -86,24 +81,19 @@ fn main() -> Result<()> {
         .anki_url
         .or_else(|| cfg.anki_url.clone())
         .unwrap_or_else(|| DEFAULT_ANKI_URL.to_owned());
-    let database = cli.database.or_else(|| cfg.bear_database.clone());
-
     let client = AnkiClient::new(&anki_url);
 
     match cli.command {
         Commands::Sync(cmd) => {
-            let db_path = resolve_database_path(database.as_deref())?;
-            let media_dir = db_path.parent().unwrap().join("Local Files/Note Images");
-            let db = BearDb::open(db_path)?;
+            let ck = sync::load_client()?;
             let mut state = SyncState::load()?;
 
             client.check_connection()?;
 
             let report = sync::sync(
-                &db,
+                &ck,
                 &client,
                 &mut state,
-                &media_dir,
                 &sync::SyncOptions {
                     tag_filter: cmd.tag.as_deref(),
                     note_filter: cmd.note.as_deref(),
@@ -128,9 +118,8 @@ fn main() -> Result<()> {
         }
 
         Commands::List(cmd) => {
-            let db_path = resolve_database_path(database.as_deref())?;
-            let db = BearDb::open(db_path)?;
-            let mut notes = db.export_notes(cmd.tag.as_deref())?;
+            let ck = sync::load_client()?;
+            let mut notes = sync::export_notes(&ck, cmd.tag.as_deref())?;
 
             if let Some(ref title) = cmd.note {
                 let title_lower = title.to_lowercase();
@@ -155,8 +144,9 @@ fn main() -> Result<()> {
                         CardKind::Basic { front, .. } => ("basic", front.as_str()),
                         CardKind::Cloze { text } => ("cloze", text.as_str()),
                     };
+                    let needs_ellipsis = preview.chars().count() > 70;
                     let preview: String = preview.chars().take(70).collect();
-                    let ellipsis = if preview.len() < 70 { "" } else { "…" };
+                    let ellipsis = if needs_ellipsis { "…" } else { "" };
                     println!("  [{kind}] {preview}{ellipsis}");
                 }
                 total_cards += cards.len();
@@ -179,21 +169,17 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            // Open Bear DB once for title lookups (best-effort)
-            let db = database
-                .as_deref()
-                .map(|p| Ok(std::path::PathBuf::from(p)))
-                .unwrap_or_else(|| resolve_database_path(None))
-                .and_then(BearDb::open)
+            let titles = sync::load_client()
+                .and_then(|ck| sync::note_title_map(&ck))
                 .ok();
 
             println!("{total} card(s) tracked across {} note(s):", counts.len());
             let mut entries: Vec<(String, usize)> = counts.into_iter().collect();
             entries.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
             for (note_id, count) in &entries {
-                let label = db
+                let label = titles
                     .as_ref()
-                    .and_then(|d| d.note_title(note_id).ok().flatten())
+                    .and_then(|m| m.get(note_id).cloned())
                     .unwrap_or_else(|| note_id.clone());
                 println!("  {count:>3} card(s)  {label}");
             }

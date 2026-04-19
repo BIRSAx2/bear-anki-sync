@@ -1,25 +1,28 @@
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::io::Read;
 
 use anyhow::Result;
-use bear_cli::config::encode_file;
+use base64::Engine as _;
 use pulldown_cmark::{Options, Parser, html};
 
 use crate::anki::AnkiClient;
 
 /// Render card text for Anki:
-/// 1. Upload image attachments and replace `![](filename)` with `<img>` tags
+/// 1. Upload image attachments and replace `![alt](filename)` with `<img>` tags
 /// 2. Render markdown to HTML
 /// 3. Convert Bear math syntax (`$...$`, `$$...$$`) to MathJax delimiters
 ///    (runs on the HTML output so `\(` is never processed as a markdown escape)
 ///
-/// `image_files` — list of `(filename, path)` for images attached to this note,
-/// obtained via `BearDb::note_files`.
+/// `image_files`   — `(filename, download_url)` pairs for images attached to this note.
+/// `upload_cache`  — deduplicate uploads across multiple `render_for_anki` calls for the
+///                   same note (keyed on download URL → Anki filename).
 pub fn render_for_anki(
     text: &str,
-    image_files: &[(String, PathBuf)],
+    image_files: &[(String, String)],
     client: &AnkiClient,
+    upload_cache: &mut HashMap<String, String>,
 ) -> Result<String> {
-    let text = process_images(text, image_files, client)?;
+    let text = process_images(text, image_files, client, upload_cache)?;
     let text = markdown_to_html(&text);
     let text = convert_math_html(&text);
     Ok(text)
@@ -136,53 +139,80 @@ fn replace_math_delimiters(
 
 // ── Image processing ─────────────────────────────────────────────────────────
 
-/// Uploads each image in `image_files` to Anki and replaces references in `text`
-/// (`![...](filename)` or bare filename) with `<img src="bear_{filename}">` tags.
+/// Uploads images referenced in `text` to Anki and replaces `![alt](filename)` with
+/// `<img src="bear_filename" alt="alt">` tags.
+///
+/// Already-uploaded images are served from `upload_cache` (keyed on download URL) to
+/// avoid re-downloading and re-uploading the same file for multiple cards in one sync.
 fn process_images(
     text: &str,
-    image_files: &[(String, PathBuf)],
+    image_files: &[(String, String)],
     client: &AnkiClient,
+    upload_cache: &mut HashMap<String, String>,
 ) -> Result<String> {
     if image_files.is_empty() {
         return Ok(text.to_owned());
     }
 
     let mut result = text.to_owned();
-    for (filename, path) in image_files {
-        let md_pattern = format!("]({})", filename);
-        if !result.contains(md_pattern.as_str()) {
-            continue;
-        }
-
-        let anki_filename = match upload_image(path, client) {
-            Ok(name) => name,
-            Err(err) => {
-                eprintln!("bear-anki: failed to upload image {filename}: {err}");
+    for (filename, download_url) in image_files {
+        // Bear percent-encodes filenames in Markdown links (e.g. "my image.png" → "my%20image.png").
+        // Build the encoded pattern first; fall back to the raw filename if unencoded.
+        let encoded_pat = format!("]({})", percent_encode_filename(filename));
+        let md_pattern = if result.contains(&encoded_pat) {
+            encoded_pat
+        } else {
+            let raw_pat = format!("]({})", filename);
+            if result.contains(&raw_pat) {
+                raw_pat
+            } else {
                 continue;
             }
         };
 
-        let img_tag = format!("<img src=\"{anki_filename}\">");
-        result = replace_md_image(&result, filename, &img_tag);
+        let anki_filename = if let Some(cached) = upload_cache.get(download_url.as_str()) {
+            cached.clone()
+        } else {
+            match upload_image(filename, download_url, client) {
+                Ok(name) => {
+                    upload_cache.insert(download_url.clone(), name.clone());
+                    name
+                }
+                Err(err) => {
+                    eprintln!("bear-anki: failed to upload image {filename}: {err}");
+                    continue;
+                }
+            }
+        };
+
+        result = replace_md_image_with_pattern(&result, &md_pattern, &anki_filename);
     }
 
     Ok(result)
 }
 
-/// Replace `![alt](filename)` (any alt text) with `img_tag`.
-/// Falls back gracefully if no matching `![` is found before `](filename)`.
-fn replace_md_image(text: &str, filename: &str, img_tag: &str) -> String {
-    let close = format!("]({})", filename);
+/// Replace every `![alt](…pattern…)` in `text` with an `<img>` tag.
+/// The alt text between `![` and `](` is preserved as the `alt` attribute.
+/// Falls back gracefully when no matching `![` precedes the pattern.
+fn replace_md_image_with_pattern(text: &str, close: &str, anki_src: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut remaining = text;
 
-    while let Some(close_pos) = remaining.find(close.as_str()) {
+    while let Some(close_pos) = remaining.find(close) {
         let before = &remaining[..close_pos];
         if let Some(open_pos) = before.rfind("![") {
+            let alt = &before[open_pos + 2..];
             result.push_str(&remaining[..open_pos]);
-            result.push_str(img_tag);
+            if alt.is_empty() {
+                result.push_str(&format!("<img src=\"{anki_src}\">"));
+            } else {
+                result.push_str(&format!(
+                    "<img src=\"{anki_src}\" alt=\"{}\">",
+                    escape_html_attr(alt)
+                ));
+            }
         } else {
-            // No matching ![  — leave the ](filename) in place
+            // No matching ![ — leave the ](filename) in place
             result.push_str(&remaining[..close_pos + close.len()]);
         }
         remaining = &remaining[close_pos + close.len()..];
@@ -191,9 +221,42 @@ fn replace_md_image(text: &str, filename: &str, img_tag: &str) -> String {
     result
 }
 
-fn upload_image(path: &std::path::Path, client: &AnkiClient) -> Result<String> {
-    let base64_data = encode_file(path)?;
-    let filename = format!("bear_{}", path.file_name().unwrap().to_string_lossy());
+/// Escape characters that are unsafe inside an HTML attribute value.
+fn escape_html_attr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("&quot;"),
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Percent-encode characters that Bear encodes when embedding filenames in Markdown links.
+fn percent_encode_filename(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        match c {
+            ' ' => out.push_str("%20"),
+            '%' => out.push_str("%25"),
+            '#' => out.push_str("%23"),
+            '?' => out.push_str("%3F"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn upload_image(filename: &str, download_url: &str, client: &AnkiClient) -> Result<String> {
+    let mut reader = ureq::get(download_url).call()?.into_reader();
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    let base64_data = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let filename = format!("bear_{filename}");
     client.store_media_file(&filename, &base64_data)?;
     Ok(filename)
 }
@@ -202,7 +265,16 @@ fn upload_image(path: &std::path::Path, client: &AnkiClient) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{convert_math, convert_math_html};
+    use super::{
+        convert_math, convert_math_html, escape_html_attr, percent_encode_filename,
+        replace_md_image_with_pattern,
+    };
+
+    // Thin wrapper used only in tests — mirrors what process_images does per image.
+    fn replace_md_image(text: &str, filename: &str, anki_src: &str) -> String {
+        let close = format!("]({})", filename);
+        replace_md_image_with_pattern(text, &close, anki_src)
+    }
 
     #[test]
     fn converts_display_math() {
@@ -271,33 +343,82 @@ mod tests {
         );
     }
 
-    use super::replace_md_image;
-
     #[test]
     fn replaces_markdown_image_no_alt() {
-        let out = replace_md_image("See ![](photo.png) here", "photo.png", "<img src=\"x\">");
-        assert_eq!(out, "See <img src=\"x\"> here");
+        let out = replace_md_image("See ![](photo.png) here", "photo.png", "bear_photo.png");
+        assert_eq!(out, "See <img src=\"bear_photo.png\"> here");
     }
 
     #[test]
-    fn replaces_markdown_image_with_alt() {
+    fn replaces_markdown_image_preserves_alt() {
         let out = replace_md_image(
-            "See ![a cat](photo.png) here",
+            "See ![a fluffy cat](photo.png) here",
             "photo.png",
-            "<img src=\"x\">",
+            "bear_photo.png",
         );
-        assert_eq!(out, "See <img src=\"x\"> here");
+        assert_eq!(
+            out,
+            "See <img src=\"bear_photo.png\" alt=\"a fluffy cat\"> here"
+        );
+    }
+
+    #[test]
+    fn alt_text_special_chars_are_escaped() {
+        let out = replace_md_image(r#"![<diagram> "A&B"](img.png)"#, "img.png", "bear_img.png");
+        assert_eq!(
+            out,
+            "<img src=\"bear_img.png\" alt=\"&lt;diagram&gt; &quot;A&amp;B&quot;\">"
+        );
     }
 
     #[test]
     fn leaves_unrelated_text_unchanged() {
-        let out = replace_md_image("no image here", "photo.png", "<img src=\"x\">");
+        let out = replace_md_image("no image here", "photo.png", "bear_photo.png");
         assert_eq!(out, "no image here");
     }
 
     #[test]
     fn replaces_multiple_occurrences() {
-        let out = replace_md_image("![](a.png) and ![](a.png)", "a.png", "<img>");
-        assert_eq!(out, "<img> and <img>");
+        let out = replace_md_image("![](a.png) and ![](a.png)", "a.png", "bear_a.png");
+        assert_eq!(out, "<img src=\"bear_a.png\"> and <img src=\"bear_a.png\">");
+    }
+
+    #[test]
+    fn percent_encode_encodes_space() {
+        assert_eq!(percent_encode_filename("my image.png"), "my%20image.png");
+    }
+
+    #[test]
+    fn percent_encode_encodes_special_chars() {
+        assert_eq!(percent_encode_filename("a%b#c?.png"), "a%25b%23c%3F.png");
+    }
+
+    #[test]
+    fn percent_encode_leaves_plain_names_unchanged() {
+        assert_eq!(percent_encode_filename("photo.png"), "photo.png");
+    }
+
+    #[test]
+    fn replace_md_image_handles_percent_encoded_filename() {
+        // Bear writes "![](my%20image.png)" in markdown for a file named "my image.png"
+        let out = replace_md_image(
+            "See ![](my%20image.png) here",
+            "my%20image.png",
+            "bear_my image.png",
+        );
+        assert_eq!(out, "See <img src=\"bear_my image.png\"> here");
+    }
+
+    #[test]
+    fn escape_html_attr_handles_all_special_chars() {
+        assert_eq!(
+            escape_html_attr("\"A\" & <B>"),
+            "&quot;A&quot; &amp; &lt;B&gt;"
+        );
+    }
+
+    #[test]
+    fn escape_html_attr_leaves_plain_text_unchanged() {
+        assert_eq!(escape_html_attr("plain text"), "plain text");
     }
 }

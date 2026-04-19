@@ -72,8 +72,9 @@ impl SyncState {
     }
 
     pub fn remove(&mut self, note_id: &str, fp: &str) -> Option<u64> {
-        self.hashes.remove(&make_key(note_id, fp));
-        self.cards.remove(&make_key(note_id, fp))
+        let key = make_key(note_id, fp);
+        self.hashes.remove(&key);
+        self.cards.remove(&key)
     }
 
     pub fn get_hash(&self, note_id: &str, fp: &str) -> Option<&str> {

@@ -52,7 +52,7 @@ impl AnkiClient {
     pub fn update_note(
         &self,
         id: u64,
-        fields: HashMap<String, String>,
+        fields: &HashMap<String, String>,
         tags: &[String],
     ) -> Result<()> {
         self.request(
@@ -100,20 +100,19 @@ impl AnkiClient {
             .set("Content-Type", "application/json")
             .send_string(&body_str)
             .map_err(|err| {
-                let is_connection_err = err
-                    .to_string()
-                    .to_lowercase()
-                    .contains("connection refused")
-                    || err.to_string().to_lowercase().contains("connect error");
+                let err_text = err.to_string();
+                let err_text_lower = err_text.to_lowercase();
+                let is_connection_err = err_text_lower.contains("connection refused")
+                    || err_text_lower.contains("connect error");
                 if is_connection_err {
                     anyhow!(
                         "could not connect to Anki at {}\n\
                          Make sure Anki is running and the AnkiConnect plugin is installed.\n\
-                         Install it from: https://ankiweb.net/shared/info/2055492159",
+                        Install it from: https://ankiweb.net/shared/info/2055492159",
                         self.url
                     )
                 } else {
-                    anyhow!("AnkiConnect request failed: {err}")
+                    anyhow!("AnkiConnect request failed: {err_text}")
                 }
             })?
             .into_string()

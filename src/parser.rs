@@ -1,8 +1,13 @@
-use bear_cli::db::ExportNote;
 use bear_cli::frontmatter::parse_front_matter;
 use sha2::{Digest, Sha256};
 
-const CALLOUT_TYPES: &[&str] = &["CARD", "TIP", "NOTE", "IMPORTANT", "WARNING"];
+const CALLOUT_PREFIXES: &[(&str, &str)] = &[
+    ("> [!CARD]", "card"),
+    ("> [!TIP]", "tip"),
+    ("> [!NOTE]", "note"),
+    ("> [!IMPORTANT]", "important"),
+    ("> [!WARNING]", "warning"),
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
@@ -18,8 +23,20 @@ pub enum CardKind {
     Cloze { text: String },
 }
 
-pub fn parse_cards(note: &ExportNote) -> Vec<Card> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BearNote {
+    pub identifier: String,
+    pub title: String,
+    pub text: String,
+    pub pinned: bool,
+    pub created_at: Option<i64>,
+    pub modified_at: Option<i64>,
+    pub tags: Vec<String>,
+}
+
+pub fn parse_cards(note: &BearNote) -> Vec<Card> {
     let (frontmatter, body) = parse_front_matter(&note.text);
+    let body = strip_html_comments(&body);
 
     let deck_override = frontmatter
         .as_ref()
@@ -99,11 +116,29 @@ pub fn parse_cards(note: &ExportNote) -> Vec<Card> {
     cards
 }
 
+fn strip_html_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        let after_start = &rest[start + 4..];
+        if let Some(end) = after_start.find("-->") {
+            rest = &after_start[end + 3..];
+        } else {
+            rest = "";
+            break;
+        }
+    }
+
+    out.push_str(rest);
+    out
+}
+
 fn detect_callout(line: &str) -> Option<(String, &str)> {
-    for &ct in CALLOUT_TYPES {
-        let prefix = format!("> [!{ct}]");
-        if let Some(rest) = line.strip_prefix(prefix.as_str()) {
-            return Some((ct.to_lowercase(), rest));
+    for &(prefix, callout_type) in CALLOUT_PREFIXES {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            return Some((callout_type.to_owned(), rest));
         }
     }
     None
@@ -212,12 +247,10 @@ fn fingerprint(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use bear_cli::db::ExportNote;
+    use super::{BearNote, CardKind, convert_cloze, parse_cards, strip_html_comments};
 
-    use super::{CardKind, convert_cloze, parse_cards};
-
-    fn make_note(title: &str, text: &str) -> ExportNote {
-        ExportNote {
+    fn make_note(title: &str, text: &str) -> BearNote {
+        BearNote {
             identifier: "NOTE-1".into(),
             title: title.into(),
             text: text.into(),
@@ -245,6 +278,42 @@ mod tests {
         );
         assert_eq!(cards[0].deck, "System Security");
         assert_eq!(cards[0].callout_type, "card");
+    }
+
+    #[test]
+    fn strips_fold_comments_from_headings() {
+        let note = make_note(
+            "Systems Security",
+            "# Systems Security\n\n## Access Control and Authentication<!-- {\"fold\":true} -->\n\n> [!CARD] What is auth?\n> Identity verification.",
+        );
+        let cards = parse_cards(&note);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].deck,
+            "Systems Security::Access Control and Authentication"
+        );
+    }
+
+    #[test]
+    fn strips_html_comments_from_card_body() {
+        let note = make_note(
+            "Systems Security",
+            "# Systems Security\n\n> [!CARD] Front\n> Bear metadata<!-- {\"preview\":\"true\"} --> stays hidden.",
+        );
+        let cards = parse_cards(&note);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].kind,
+            CardKind::Basic {
+                front: "Front".into(),
+                back: "Bear metadata stays hidden.".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn strip_html_comments_handles_unclosed_comment() {
+        assert_eq!(strip_html_comments("hello <!-- broken"), "hello ");
     }
 
     #[test]

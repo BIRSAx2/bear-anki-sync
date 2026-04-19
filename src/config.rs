@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Loaded from `~/Library/Application Support/bear-anki/config.toml`.
 /// Missing file → all defaults. Unknown keys are ignored.
 ///
-/// Precedence for `anki_url` and `bear_database`:
+/// Precedence for `anki_url`:
 ///   CLI flag / env var  >  config file  >  built-in default
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -19,9 +19,10 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anki_url: Option<String>,
 
-    /// Override Bear SQLite path (default: auto-discovered).
+    /// Background sync cadence for the menu bar app.
+    /// `None` or `0` disables periodic sync.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub bear_database: Option<String>,
+    pub sync_interval_minutes: Option<u64>,
 
     /// Maps callout type (lowercase) → Anki tag.
     ///
@@ -38,7 +39,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             anki_url: None,
-            bear_database: None,
+            sync_interval_minutes: None,
             tags: default_tags(),
         }
     }
@@ -111,10 +112,7 @@ mod tests {
     fn default_tags_cover_all_callout_types() {
         let cfg = Config::default();
         for ct in &["important", "note", "tip", "warning", "card"] {
-            assert!(
-                cfg.tags.contains_key(*ct),
-                "missing default tag for {ct}"
-            );
+            assert!(cfg.tags.contains_key(*ct), "missing default tag for {ct}");
         }
     }
 
@@ -133,8 +131,10 @@ mod tests {
 
     #[test]
     fn round_trips_through_toml() {
-        let mut cfg = Config::default();
-        cfg.anki_url = Some("http://localhost:9999".into());
+        let mut cfg = Config {
+            anki_url: Some("http://localhost:9999".into()),
+            ..Config::default()
+        };
         cfg.tags.insert("important".into(), "must-know".into());
 
         let text = toml::to_string_pretty(&cfg).unwrap();
