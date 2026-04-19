@@ -2,7 +2,7 @@ use bear_cli::db::ExportNote;
 use bear_cli::frontmatter::parse_front_matter;
 use sha2::{Digest, Sha256};
 
-const CALLOUT_TYPES: &[&str] = &["CARD", "TIP", "NOTE", "IMPORTANT"];
+const CALLOUT_TYPES: &[&str] = &["CARD", "TIP", "NOTE", "IMPORTANT", "WARNING"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Card {
@@ -421,15 +421,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_warning_callout() {
+        let note = make_note(
+            "Deck",
+            "# Deck\n\n> [!WARNING] Never use textbook RSA.\n> It is malleable and provides no semantic security.",
+        );
+        let cards = parse_cards(&note);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].callout_type, "warning");
+    }
+
+    #[test]
     fn parses_mixed_callout_types_in_one_note() {
         let note = make_note(
             "Deck",
-            "# Deck\n\n> [!CARD] Q?\n> A.\n\n> [!TIP] T?\n> T.\n\n> [!IMPORTANT] I?\n> I.",
+            "# Deck\n\n> [!CARD] Q?\n> A.\n\n> [!TIP] T?\n> T.\n\n> [!IMPORTANT] I?\n> I.\n\n> [!WARNING] W?\n> W.",
         );
         let cards = parse_cards(&note);
-        assert_eq!(cards.len(), 3);
+        assert_eq!(cards.len(), 4);
         assert_eq!(cards[0].callout_type, "card");
         assert_eq!(cards[1].callout_type, "tip");
         assert_eq!(cards[2].callout_type, "important");
+        assert_eq!(cards[3].callout_type, "warning");
     }
 }

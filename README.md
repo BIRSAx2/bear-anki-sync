@@ -22,38 +22,53 @@ The binary is named `bear-anki`.
 
 ## Card syntax
 
-Cards are callout blocks. Four types are recognised: `CARD`, `TIP`, `NOTE`, `IMPORTANT`. The type becomes an Anki tag (`bear-card`, `bear-tip`, `bear-note`, `bear-important`).
+Cards are callout blocks. Five types are recognised:
+
+| Callout | Anki tag | Intended use |
+|---|---|---|
+| `[!IMPORTANT]` | `bear-important` | Must-know facts, key definitions |
+| `[!NOTE]` | `bear-note` | Standard definitions, reference material |
+| `[!TIP]` | `bear-tip` | Mnemonics, practical rules, shortcuts |
+| `[!WARNING]` | `bear-warning` | Pitfalls, common mistakes, gotchas |
+| `[!CARD]` | `bear-card` | Generic — use when none of the above fit |
+
+Use the callout type that best reflects the nature of the content. The callout type is attached as an Anki tag so cards can be filtered in Anki by category.
 
 ### Basic card — title as front
 
 ```markdown
-> [!CARD] What is a buffer overflow?
-> Memory written beyond the bounds of an allocated buffer,
-> potentially overwriting adjacent memory.
+> [!IMPORTANT] STRIDE
+> Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, Elevation of privileges.
+
+> [!NOTE] Cryptographic hash function
+> A function mapping arbitrary-length input to a fixed-length digest. Must satisfy preimage resistance, second preimage resistance, and collision resistance.
+
+> [!WARNING] Textbook RSA is malleable
+> Enc(m₁) · Enc(m₂) = Enc(m₁ · m₂). Never use RSA without proper padding (OAEP or PKCS#1 v1.5).
 ```
 
-The callout title is the front, the body is the back.
+The callout title is the card front; the body is the back.
 
 ### Basic card — body separator
 
 ```markdown
-> [!CARD]
+> [!NOTE]
 > What is the difference between TCP and UDP?
 > ---
 > TCP is connection-oriented and guarantees delivery.
 > UDP is connectionless and trades reliability for speed.
 ```
 
-`---` inside the body splits front from back when multi-line front text is needed.
+`---` inside the body splits front from back when the front requires multiple lines.
 
 ### Cloze card
 
 ```markdown
-> [!CARD]
-> The {{mitochondria}} is the powerhouse of the {{cell}}.
+> [!IMPORTANT]
+> The {{one-time pad}} provides perfect secrecy because every ciphertext is equally likely for any plaintext.
 ```
 
-`{{word}}` converts to Anki's `{{c1::word}}`, `{{c2::word}}`, etc.
+`{{word}}` converts to Anki's `{{c1::word}}`, `{{c2::word}}`, etc. Cloze detection takes priority over the title/separator formats.
 
 ### Deck from heading hierarchy
 
@@ -61,14 +76,14 @@ The Anki deck is derived from the headings at the position of the card:
 
 ```markdown
 # Systems Security
-## Chapter 3
-### Memory Safety
+## Cryptography
+### Symmetric Encryption
 
-> [!CARD] What causes a use-after-free?
-> Accessing memory after it has been freed.
+> [!IMPORTANT] AES modes
+> ECB is insecure (same block → same ciphertext). Use CBC, CTR, or GCM.
 ```
 
-This card is placed in `Systems Security::Chapter 3::Memory Safety`. A `##` heading clears `###`; a `#` heading clears both.
+This card is placed in `Systems Security::Cryptography::Symmetric Encryption`. A `##` heading clears `###`; a `#` heading clears both.
 
 ### Frontmatter deck override
 
@@ -128,9 +143,9 @@ Example output:
 
 ```
 Systems Security (3 cards)
-  [basic] What is a buffer overflow?
-  [basic] What causes a use-after-free?
-  [cloze] The {{c1::stack}} grows downward on x86.
+  [basic] STRIDE
+  [basic] AES modes
+  [cloze] The {{c1::one-time pad}} provides perfect secrecy...
 ```
 
 ### `status`
