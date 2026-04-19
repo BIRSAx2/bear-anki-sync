@@ -6,6 +6,7 @@ use bear_cli::db::BearDb;
 use sha2::{Digest, Sha256};
 
 use crate::anki::{AnkiClient, AnkiNote};
+use crate::config::Config;
 use crate::parser::{Card, CardKind, parse_cards};
 use crate::render::render_for_anki;
 use crate::state::SyncState;
@@ -23,6 +24,7 @@ pub struct SyncOptions<'a> {
     pub dry_run: bool,
     pub force: bool,
     pub verbose: bool,
+    pub config: &'a Config,
 }
 
 pub fn sync(
@@ -105,7 +107,7 @@ pub fn sync(
                 report.skipped += 1;
                 continue;
             }
-            let anki_note = build_anki_note(card, image_files, bear_tags, client)?;
+            let anki_note = build_anki_note(card, image_files, bear_tags, client, opts.config)?;
             if opts.dry_run {
                 println!(
                     "[dry-run] would update Anki note {anki_id} (deck: {})",
@@ -135,7 +137,7 @@ pub fn sync(
             report.updated += 1;
         } else {
             // New card
-            let anki_note = build_anki_note(card, image_files, bear_tags, client)?;
+            let anki_note = build_anki_note(card, image_files, bear_tags, client, opts.config)?;
             if opts.dry_run {
                 println!(
                     "[dry-run] would add card to deck {:?} ({})",
@@ -192,8 +194,9 @@ fn build_anki_note(
     image_files: &[(String, PathBuf)],
     bear_tags: &[String],
     client: &AnkiClient,
+    config: &Config,
 ) -> Result<AnkiNote> {
-    let mut tags = vec![format!("bear-{}", card.callout_type)];
+    let mut tags = vec![config.tag_for(&card.callout_type)];
     for t in bear_tags {
         // Normalise Bear's hierarchy separator / → :: for Anki
         tags.push(t.replace('/', "::"));

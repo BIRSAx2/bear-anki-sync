@@ -1,4 +1,5 @@
 mod anki;
+mod config;
 mod parser;
 mod render;
 mod state;
@@ -10,6 +11,7 @@ use bear_cli::db::BearDb;
 use clap::{Args, Parser, Subcommand};
 
 use crate::anki::AnkiClient;
+use crate::config::Config;
 use crate::parser::parse_cards;
 use crate::state::SyncState;
 
@@ -25,8 +27,8 @@ struct Cli {
     #[arg(long, global = true, env = "BEAR_DATABASE")]
     database: Option<String>,
 
-    #[arg(long, global = true, default_value = DEFAULT_ANKI_URL, env = "ANKI_URL")]
-    anki_url: String,
+    #[arg(long, global = true, env = "ANKI_URL")]
+    anki_url: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -84,11 +86,20 @@ struct ResetCommand {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let client = AnkiClient::new(&cli.anki_url);
+    let cfg = Config::load()?;
+
+    // Priority: CLI flag / env var  >  config file  >  built-in default
+    let anki_url = cli
+        .anki_url
+        .or_else(|| cfg.anki_url.clone())
+        .unwrap_or_else(|| DEFAULT_ANKI_URL.to_owned());
+    let database = cli.database.or_else(|| cfg.bear_database.clone());
+
+    let client = AnkiClient::new(&anki_url);
 
     match cli.command {
         Commands::Sync(cmd) => {
-            let db_path = resolve_database_path(cli.database.as_deref())?;
+            let db_path = resolve_database_path(database.as_deref())?;
             let media_dir = db_path.parent().unwrap().join("Local Files/Note Images");
             let db = BearDb::open(db_path)?;
             let mut state = SyncState::load()?;
@@ -106,6 +117,7 @@ fn main() -> Result<()> {
                     dry_run: cmd.dry_run,
                     force: cmd.force,
                     verbose: cmd.verbose,
+                    config: &cfg,
                 },
             )?;
 
@@ -123,7 +135,7 @@ fn main() -> Result<()> {
         }
 
         Commands::List(cmd) => {
-            let db_path = resolve_database_path(cli.database.as_deref())?;
+            let db_path = resolve_database_path(database.as_deref())?;
             let db = BearDb::open(db_path)?;
             let mut notes = db.export_notes(cmd.tag.as_deref())?;
 
@@ -175,8 +187,7 @@ fn main() -> Result<()> {
             }
 
             // Open Bear DB once for title lookups (best-effort)
-            let db = cli
-                .database
+            let db = database
                 .as_deref()
                 .map(|p| Ok(std::path::PathBuf::from(p)))
                 .unwrap_or_else(|| resolve_database_path(None))
