@@ -1,19 +1,12 @@
-mod anki;
-mod config;
-mod parser;
-mod render;
-mod state;
-mod sync;
-
 use anyhow::Result;
+use bear_anki_sync::anki::AnkiClient;
+use bear_anki_sync::config::Config;
+use bear_anki_sync::parser::parse_cards;
+use bear_anki_sync::state::SyncState;
+use bear_anki_sync::sync;
 use bear_cli::config::resolve_database_path;
 use bear_cli::db::BearDb;
 use clap::{Args, Parser, Subcommand};
-
-use crate::anki::AnkiClient;
-use crate::config::Config;
-use crate::parser::parse_cards;
-use crate::state::SyncState;
 
 const DEFAULT_ANKI_URL: &str = "http://127.0.0.1:8765";
 
@@ -157,7 +150,7 @@ fn main() -> Result<()> {
                 }
                 println!("{} ({} card(s))", note.title, cards.len());
                 for card in &cards {
-                    use crate::parser::CardKind;
+                    use bear_anki_sync::parser::CardKind;
                     let (kind, preview) = match &card.kind {
                         CardKind::Basic { front, .. } => ("basic", front.as_str()),
                         CardKind::Cloze { text } => ("cloze", text.as_str()),

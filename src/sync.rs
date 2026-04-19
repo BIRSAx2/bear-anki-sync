@@ -11,6 +11,7 @@ use crate::parser::{Card, CardKind, parse_cards};
 use crate::render::render_for_anki;
 use crate::state::SyncState;
 
+#[derive(Debug)]
 pub struct SyncReport {
     pub added: usize,
     pub updated: usize,
