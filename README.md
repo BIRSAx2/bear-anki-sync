@@ -17,19 +17,27 @@ Comes as two binaries:
 
 ## Installation
 
+### CLI only
+
 ```sh
 cargo install bear-anki-sync
 ```
 
-Or build from source:
+This installs the `bear-anki` command to `~/.cargo/bin/`.
+
+### Menu bar app
+
+`bear-anki-app` must be packaged as a `.app` bundle to appear in Launchpad and Spotlight. After `cargo install`, run the binary once with `--install`:
 
 ```sh
-git clone https://github.com/BIRSAx2/bear-anki-sync
-cd bear-anki-sync
-cargo install --path .
+cargo install bear-anki-sync
+bear-anki-app --install                          # installs to ~/Applications
+bear-anki-app --install --apps-dir /Applications # installs system-wide
 ```
 
-On first run, `bear-anki` will open an Apple sign-in page to authorise CloudKit access and save the token for future runs. Re-run `bear-anki sync` (or click **Authenticate Bear** in the menu bar app) at any time to refresh it.
+This wraps the installed binary in `BearAnki.app`, generates an app icon from the bundled SVG, and registers the bundle with Launch Services so it appears immediately in Launchpad and Spotlight. Safe to re-run after upgrading.
+
+On first run, `bear-anki` (or the menu bar app) will open an Apple sign-in page to authorise CloudKit access and save the token for future runs. Re-run `bear-anki sync` (or click **Authenticate Bear** in the menu bar app) at any time to refresh it.
 
 ## Card syntax
 

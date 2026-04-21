@@ -519,6 +519,28 @@ fn card_icon() -> tray_icon::Icon {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    // `bear-anki-app --install [--apps-dir <path>]`
+    // Wraps the running binary in a proper .app bundle so it appears in
+    // Launchpad and Spotlight. Safe to re-run — removes the old bundle first.
+    if args.iter().any(|a| a == "--install") {
+        let apps_dir = args
+            .windows(2)
+            .find(|w| w[0] == "--apps-dir")
+            .map(|w| std::path::PathBuf::from(&w[1]))
+            .unwrap_or_else(|| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_owned());
+                std::path::PathBuf::from(home).join("Applications")
+            });
+
+        if let Err(e) = install_app_bundle(&apps_dir) {
+            eprintln!("bear-anki-app: install failed: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let cfg = Config::load().unwrap_or_default();
     let anki_url = cfg
         .anki_url
@@ -534,4 +556,119 @@ fn main() {
 
     let mut app = MenuBarApp::new(proxy, anki_url, cfg);
     event_loop.run_app(&mut app).expect("event loop error");
+}
+
+fn install_app_bundle(apps_dir: &std::path::Path) -> anyhow::Result<()> {
+    use std::process::Command;
+
+    let exe = std::env::current_exe()?;
+    let app_dir = apps_dir.join("BearAnki.app");
+
+    if app_dir.exists() {
+        std::fs::remove_dir_all(&app_dir)?;
+    }
+
+    let macos_dir = app_dir.join("Contents/MacOS");
+    let resources_dir = app_dir.join("Contents/Resources");
+    std::fs::create_dir_all(&macos_dir)?;
+    std::fs::create_dir_all(&resources_dir)?;
+
+    std::fs::copy(&exe, macos_dir.join("bear-anki-app"))?;
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.birsax2.bear-anki-app</string>
+    <key>CFBundleName</key>
+    <string>BearAnki</string>
+    <key>CFBundleDisplayName</key>
+    <string>Bear Anki Sync</string>
+    <key>CFBundleExecutable</key>
+    <string>bear-anki-app</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>{}</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>12.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>"#,
+        env!("CARGO_PKG_VERSION")
+    );
+    std::fs::write(app_dir.join("Contents/Info.plist"), plist)?;
+
+    if let Err(e) = generate_icns(&resources_dir) {
+        eprintln!("bear-anki-app: icon generation skipped: {e}");
+    }
+
+    let lsregister = concat!(
+        "/System/Library/Frameworks/CoreServices.framework",
+        "/Versions/A/Frameworks/LaunchServices.framework",
+        "/Versions/A/Support/lsregister"
+    );
+    let _ = Command::new(lsregister)
+        .args(["-f", app_dir.to_str().unwrap_or("")])
+        .status();
+
+    println!("Installed: {}", app_dir.display());
+    println!(
+        "Launch from Launchpad or Spotlight, or: open '{}'",
+        app_dir.display()
+    );
+    Ok(())
+}
+
+fn generate_icns(resources_dir: &std::path::Path) -> anyhow::Result<()> {
+    use std::process::Command;
+
+    let svg = include_str!("../assets/icon.svg");
+    let opt = Options::default();
+    let tree = Tree::from_str(svg, &opt).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let iconset = std::env::temp_dir().join("BearAnki.iconset");
+    if iconset.exists() {
+        std::fs::remove_dir_all(&iconset)?;
+    }
+    std::fs::create_dir_all(&iconset)?;
+
+    for &size in &[16u32, 32, 64, 128, 256, 512] {
+        let mut pixmap =
+            Pixmap::new(size, size).ok_or_else(|| anyhow::anyhow!("pixmap alloc failed"))?;
+        let svg_size = tree.size();
+        let sx = size as f32 / svg_size.width();
+        let sy = size as f32 / svg_size.height();
+        resvg::render(&tree, Transform::from_scale(sx, sy), &mut pixmap.as_mut());
+        pixmap.save_png(iconset.join(format!("icon_{size}x{size}.png")))?;
+    }
+
+    // Create @2x entries by copying the higher-resolution variants
+    for &(base, double) in &[(16u32, 32u32), (32, 64), (64, 128), (128, 256), (256, 512)] {
+        std::fs::copy(
+            iconset.join(format!("icon_{double}x{double}.png")),
+            iconset.join(format!("icon_{base}x{base}@2x.png")),
+        )?;
+    }
+
+    let icns_path = resources_dir.join("AppIcon.icns");
+    let status = Command::new("iconutil")
+        .args(["-c", "icns", "-o"])
+        .arg(&icns_path)
+        .arg(&iconset)
+        .status()?;
+
+    let _ = std::fs::remove_dir_all(&iconset);
+
+    anyhow::ensure!(status.success(), "iconutil exited with {status}");
+    Ok(())
 }
