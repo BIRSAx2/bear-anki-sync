@@ -6,8 +6,8 @@ Cards are written as callout blocks inside Bear notes. The note's heading hierar
 
 Comes as two binaries:
 
-- **`bear-anki`** — CLI for scripting and manual syncs
-- **`bear-anki-app`** — native macOS menu bar app with auto-sync
+- **`bear-anki`**: CLI for scripting and manual syncs
+- **`bear-anki-app`** : native macOS menu bar app with auto-sync
 
 ## Requirements
 
@@ -37,7 +37,7 @@ Cards are Bear callout blocks. Five types are recognised:
 
 | Callout | Default Anki tag | Intended use |
 |---|---|---|
-| `[!CARD]` | `bear-card` | Generic — use when none of the below fit |
+| `[!CARD]` | `bear-card` | Generic : use when none of the below fit |
 | `[!IMPORTANT]` | `bear-important` | Must-know facts, key definitions |
 | `[!NOTE]` | `bear-note` | Standard definitions, reference material |
 | `[!TIP]` | `bear-tip` | Mnemonics, practical rules, shortcuts |
@@ -45,7 +45,7 @@ Cards are Bear callout blocks. Five types are recognised:
 
 The callout type is attached as an Anki tag, so you can filter cards by category inside Anki.
 
-### Basic card — title as front
+### Basic card : title as front
 
 The callout title is the card front; the body is the back.
 
@@ -57,7 +57,7 @@ The callout title is the card front; the body is the back.
 > Enc(m₁) · Enc(m₂) = Enc(m₁ · m₂). Always use OAEP or PKCS#1 v1.5 padding.
 ```
 
-### Basic card — body separator
+### Basic card : body separator
 
 Use `---` inside the body when the front needs more than one line.
 
@@ -82,7 +82,7 @@ converted to Anki's `{{c1::word}}`, `{{c2::word}}`, etc.
 > TCP's three-way handshake is {{SYN}}, {{SYN-ACK}}, {{ACK}}.
 ```
 
-Cloze detection takes priority — if the body contains `{{`, the callout title is ignored and the entire body becomes the cloze text.
+Cloze detection takes priority : if the body contains `{{`, the callout title is ignored and the entire body becomes the cloze text.
 
 ### Deck from heading hierarchy
 
@@ -96,7 +96,7 @@ The Anki deck path mirrors the heading context at the card's position:
 ### Symmetric Encryption
 
 > [!IMPORTANT] AES-GCM
-> Authenticated encryption mode — provides both confidentiality and integrity. Nonce must never be reused.
+> Authenticated encryption mode : provides both confidentiality and integrity. Nonce must never be reused.
 ```
 
 This card lands in **Systems Security::Cryptography::Symmetric Encryption**.
@@ -152,9 +152,9 @@ Math inside code spans and fenced code blocks is left untouched.
 
 **Menu actions:**
 
-- **Sync Now** — incremental sync (skips unchanged cards)
-- **Force Re-sync** — re-syncs all cards regardless of content hash
-- **Check / Re-authenticate Bear** — refresh the CloudKit token
+- **Sync Now** : incremental sync (skips unchanged cards)
+- **Force Re-sync** : re-syncs all cards regardless of content hash
+- **Check / Re-authenticate Bear** : refresh the CloudKit token
 
 **Auto-sync:** set `sync_interval_minutes` in the config file to sync automatically in the background (see [Configuration](#configuration)).
 
@@ -230,7 +230,7 @@ Flag and env var take precedence over the config file.
 
 ## Configuration
 
-Config is read from `~/Library/Application Support/bear-anki/config.toml`. The file is optional — all settings have defaults. Unknown keys are ignored.
+Config is read from `~/Library/Application Support/bear-anki/config.toml`. The file is optional : all settings have defaults. Unknown keys are ignored.
 
 ```toml
 # AnkiConnect endpoint. Override if Anki runs on a non-default port or host.
@@ -274,7 +274,7 @@ The sync state lives at `~/Library/Application Support/bear-anki/state.json`. It
 
 ### Content hash
 
-A separate SHA-256 hash covers the full card content (deck, callout type, front, back). This is what determines whether a card needs to be updated — the fingerprint only determines *identity*, while the hash determines *whether the content changed*.
+A separate SHA-256 hash covers the full card content (deck, callout type, front, back). This is what determines whether a card needs to be updated : the fingerprint only determines *identity*, while the hash determines *whether the content changed*.
 
 ---
 
@@ -282,7 +282,7 @@ A separate SHA-256 hash covers the full card content (deck, callout type, front,
 
 - Encrypted and locked Bear notes are not synced.
 - `sync` and `reset --delete-anki-notes` require Anki to be open with AnkiConnect active.
-- The menu bar app requires macOS (uses the Accessory activation policy — no Dock icon).
+- The menu bar app requires macOS (uses the Accessory activation policy : no Dock icon).
 - Math conversion runs after markdown rendering so CommonMark never strips the backslashes from `\(` and `\[`.
 - If a card was synced before an image was correctly uploaded (e.g. after fixing a filename encoding issue), run `bear-anki sync --force` to re-process it.
 
