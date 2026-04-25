@@ -124,7 +124,7 @@ fn state_path() -> Result<PathBuf> {
 mod tests {
     use std::fs;
 
-    use super::{SyncState, make_key};
+    use super::{make_key, SyncState};
 
     // Each test gets a unique file path to avoid concurrent test interference.
     fn temp_state(tag: &str) -> SyncState {

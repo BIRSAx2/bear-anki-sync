@@ -1,4 +1,4 @@
-use bear_cli::frontmatter::parse_front_matter;
+use bear_rs::frontmatter::parse_front_matter;
 use sha2::{Digest, Sha256};
 
 const CALLOUT_PREFIXES: &[(&str, &str)] = &[
@@ -247,7 +247,7 @@ fn fingerprint(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BearNote, CardKind, convert_cloze, parse_cards, strip_html_comments};
+    use super::{convert_cloze, parse_cards, strip_html_comments, BearNote, CardKind};
 
     fn make_note(title: &str, text: &str) -> BearNote {
         BearNote {

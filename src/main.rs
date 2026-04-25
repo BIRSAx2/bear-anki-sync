@@ -85,13 +85,13 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Sync(cmd) => {
-            let ck = sync::load_client()?;
+            let store = sync::load_client()?;
             let mut state = SyncState::load()?;
 
             client.check_connection()?;
 
             let report = sync::sync(
-                &ck,
+                &store,
                 &client,
                 &mut state,
                 &sync::SyncOptions {
@@ -118,8 +118,8 @@ fn main() -> Result<()> {
         }
 
         Commands::List(cmd) => {
-            let ck = sync::load_client()?;
-            let mut notes = sync::export_notes(&ck, cmd.tag.as_deref())?;
+            let store = sync::load_client()?;
+            let mut notes = sync::export_notes(&store, cmd.tag.as_deref())?;
 
             if let Some(ref title) = cmd.note {
                 let title_lower = title.to_lowercase();
@@ -170,7 +170,7 @@ fn main() -> Result<()> {
             }
 
             let titles = sync::load_client()
-                .and_then(|ck| sync::note_title_map(&ck))
+                .and_then(|store| sync::note_title_map(&store))
                 .ok();
 
             println!("{total} card(s) tracked across {} note(s):", counts.len());

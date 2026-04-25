@@ -11,7 +11,7 @@ Comes as two binaries:
 
 ## Requirements
 
-- macOS with Bear and CloudKit sync enabled
+- macOS with Bear installed
 - Anki desktop with the [AnkiConnect](https://ankiweb.net/shared/info/2055492159) plugin (code `2055492159`)
 - Rust 1.85+
 
@@ -37,7 +37,7 @@ bear-anki-app --install --apps-dir /Applications # installs system-wide
 
 This wraps the installed binary in `BearAnki.app`, generates an app icon from the bundled SVG, and registers the bundle with Launch Services so it appears immediately in Launchpad and Spotlight. Safe to re-run after upgrading.
 
-On first run, `bear-anki` (or the menu bar app) will open an Apple sign-in page to authorise CloudKit access and save the token for future runs. Re-run `bear-anki sync` (or click **Authenticate Bear** in the menu bar app) at any time to refresh it.
+`bear-anki-sync` reads notes and attachments directly from Bear's local SQLite database via `bear-rs`, so no CloudKit sign-in is needed.
 
 ## Card syntax
 
@@ -136,7 +136,7 @@ Bear tags on a note are copied to all its Anki cards. The `/` hierarchy separato
 
 ### Images
 
-Images attached to a Bear note are automatically downloaded from CloudKit, uploaded to Anki's media collection, and embedded as `<img>` tags. Alt text written in the markdown (`![diagram of X](…)`) is preserved in the `alt` attribute.
+Images attached to a Bear note are read from Bear's local attachment store, uploaded to Anki's media collection, and embedded as `<img>` tags. Alt text written in the markdown (`![diagram of X](…)`) is preserved in the `alt` attribute.
 
 Each unique image is uploaded at most once per sync run, even if it appears in multiple cards from the same note.
 
@@ -156,13 +156,13 @@ Math inside code spans and fenced code blocks is left untouched.
 
 ## Menu bar app
 
-`bear-anki-app` runs as a macOS menu bar icon. It shows sync status, auth state, last sync time, and card count at a glance.
+`bear-anki-app` runs as a macOS menu bar icon. It shows sync status, Bear access state, last sync time, and card count at a glance.
 
 **Menu actions:**
 
 - **Sync Now** : incremental sync (skips unchanged cards)
 - **Force Re-sync** : re-syncs all cards regardless of content hash
-- **Check / Re-authenticate Bear** : refresh the CloudKit token
+- **Check Bear Access** : verify Bear's local database is readable
 
 **Auto-sync:** set `sync_interval_minutes` in the config file to sync automatically in the background (see [Configuration](#configuration)).
 

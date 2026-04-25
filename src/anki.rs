@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use anyhow::{Context, Result, anyhow, bail};
-use serde_json::{Value, json};
+use anyhow::{anyhow, bail, Context, Result};
+use serde_json::{json, Value};
 
 pub struct AnkiClient {
     url: String,
