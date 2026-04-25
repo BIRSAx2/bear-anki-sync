@@ -1,11 +1,17 @@
 use std::collections::HashMap;
-use std::io::Read;
 
 use anyhow::Result;
 use base64::Engine as _;
-use pulldown_cmark::{Options, Parser, html};
+use pulldown_cmark::{html, Options, Parser};
 
 use crate::anki::AnkiClient;
+
+#[derive(Debug, Clone)]
+pub struct NoteImage {
+    pub filename: String,
+    pub upload_key: String,
+    pub data: Vec<u8>,
+}
 
 /// Render card text for Anki:
 /// 1. Upload image attachments and replace `![alt](filename)` with `<img>` tags
@@ -13,12 +19,12 @@ use crate::anki::AnkiClient;
 /// 3. Convert Bear math syntax (`$...$`, `$$...$$`) to MathJax delimiters
 ///    (runs on the HTML output so `\(` is never processed as a markdown escape)
 ///
-/// `image_files`   — `(filename, download_url)` pairs for images attached to this note.
+/// `image_files`   — images attached to this note.
 /// `upload_cache`  — deduplicate uploads across multiple `render_for_anki` calls for the
-///                   same note (keyed on download URL → Anki filename).
+///                   same note (keyed on attachment identity → Anki filename).
 pub fn render_for_anki(
     text: &str,
-    image_files: &[(String, String)],
+    image_files: &[NoteImage],
     client: &AnkiClient,
     upload_cache: &mut HashMap<String, String>,
 ) -> Result<String> {
@@ -146,7 +152,7 @@ fn replace_math_delimiters(
 /// avoid re-downloading and re-uploading the same file for multiple cards in one sync.
 fn process_images(
     text: &str,
-    image_files: &[(String, String)],
+    image_files: &[NoteImage],
     client: &AnkiClient,
     upload_cache: &mut HashMap<String, String>,
 ) -> Result<String> {
@@ -155,7 +161,8 @@ fn process_images(
     }
 
     let mut result = text.to_owned();
-    for (filename, download_url) in image_files {
+    for image in image_files {
+        let filename = image.filename.as_str();
         // Bear percent-encodes filenames in Markdown links (e.g. "my image.png" → "my%20image.png").
         // Build the encoded pattern first; fall back to the raw filename if unencoded.
         let encoded_pat = format!("]({})", percent_encode_filename(filename));
@@ -170,12 +177,12 @@ fn process_images(
             }
         };
 
-        let anki_filename = if let Some(cached) = upload_cache.get(download_url.as_str()) {
+        let anki_filename = if let Some(cached) = upload_cache.get(image.upload_key.as_str()) {
             cached.clone()
         } else {
-            match upload_image(filename, download_url, client) {
+            match upload_image(filename, &image.data, client) {
                 Ok(name) => {
-                    upload_cache.insert(download_url.clone(), name.clone());
+                    upload_cache.insert(image.upload_key.clone(), name.clone());
                     name
                 }
                 Err(err) => {
@@ -251,11 +258,8 @@ fn percent_encode_filename(name: &str) -> String {
     out
 }
 
-fn upload_image(filename: &str, download_url: &str, client: &AnkiClient) -> Result<String> {
-    let mut reader = ureq::get(download_url).call()?.into_reader();
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    let base64_data = base64::engine::general_purpose::STANDARD.encode(bytes);
+fn upload_image(filename: &str, data: &[u8], client: &AnkiClient) -> Result<String> {
+    let base64_data = base64::engine::general_purpose::STANDARD.encode(data);
     let filename = format!("bear_{filename}");
     client.store_media_file(&filename, &base64_data)?;
     Ok(filename)

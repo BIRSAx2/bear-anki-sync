@@ -2,7 +2,6 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use bear_anki_sync::anki::AnkiClient;
-use bear_anki_sync::auth_error::is_auth_error_message;
 use bear_anki_sync::config::Config;
 use bear_anki_sync::state::SyncState;
 use bear_anki_sync::sync::{self, SyncOptions, SyncReport};
@@ -22,7 +21,6 @@ use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 enum AppEvent {
     SyncDone(Result<SyncReport, String>),
     AuthChecked(Result<(), String>),
-    AuthDone(Result<(), String>),
 }
 
 struct MenuBarApp {
@@ -43,8 +41,7 @@ struct MenuBarApp {
     cfg: Config,
 
     is_syncing: bool,
-    is_authenticating: bool,
-    is_authenticated: bool,
+    is_bear_available: bool,
     card_count: usize,
     last_sync_at: Option<SystemTime>,
     last_sync_failed_message: Option<String>,
@@ -71,7 +68,7 @@ impl MenuBarApp {
                 None,
             ),
             auth_item: IconMenuItem::with_native_icon(
-                "Check Bear Authentication",
+                "Check Bear Access",
                 true,
                 Some(NativeIcon::User),
                 None,
@@ -83,7 +80,7 @@ impl MenuBarApp {
                 None,
             ),
             auth_status_item: IconMenuItem::with_native_icon(
-                "Bear auth: checking...",
+                "Bear: checking access...",
                 false,
                 Some(NativeIcon::StatusPartiallyAvailable),
                 None,
@@ -116,8 +113,7 @@ impl MenuBarApp {
             anki_url,
             cfg,
             is_syncing: false,
-            is_authenticating: false,
-            is_authenticated: false,
+            is_bear_available: false,
             card_count,
             last_sync_at: None,
             last_sync_failed_message: None,
@@ -150,13 +146,10 @@ impl MenuBarApp {
     }
 
     fn refresh_auth_status(&mut self) {
-        if self.is_authenticating {
-            return;
-        }
-        self.auth_status_item.set_text("Bear auth: checking...");
+        self.auth_status_item.set_text("Bear: checking access...");
         self.auth_status_item
             .set_native_icon(Some(NativeIcon::StatusPartiallyAvailable));
-        self.auth_item.set_text("Check Bear Authentication");
+        self.auth_item.set_text("Check Bear Access");
         self.auth_item.set_enabled(false);
 
         let proxy = self.proxy.clone();
@@ -167,74 +160,34 @@ impl MenuBarApp {
     }
 
     fn start_authenticate(&mut self) {
-        if self.is_authenticating || self.is_syncing {
-            return;
-        }
-        self.is_authenticating = true;
-        self.auth_item.set_text("Authenticating...");
-        self.auth_item.set_enabled(false);
-        self.auth_status_item
-            .set_text("Bear auth: sign-in in progress");
-        self.auth_status_item
-            .set_native_icon(Some(NativeIcon::RefreshFreestanding));
-        self.sync_item.set_enabled(false);
-        self.force_item.set_enabled(false);
-
-        let proxy = self.proxy.clone();
-        thread::spawn(move || {
-            let result = sync::authenticate().map_err(|e| e.to_string());
-            let _ = proxy.send_event(AppEvent::AuthDone(result));
-        });
+        self.refresh_auth_status();
     }
 
     fn on_auth_checked(&mut self, result: Result<(), String>) {
         match result {
             Ok(()) => {
-                self.is_authenticated = true;
-                self.auth_status_item.set_text("Bear auth: connected");
+                self.is_bear_available = true;
+                self.auth_status_item.set_text("Bear: available");
                 self.auth_status_item
                     .set_native_icon(Some(NativeIcon::StatusAvailable));
-                self.auth_item.set_text("Re-authenticate Bear");
+                self.auth_item.set_text("Re-check Bear Access");
                 self.auth_item.set_enabled(true);
             }
             Err(msg) => {
-                self.is_authenticated = false;
+                self.is_bear_available = false;
                 self.auth_status_item
-                    .set_text(format!("Bear auth: {}", concise_auth_error(&msg)));
+                    .set_text(format!("Bear: {}", concise_auth_error(&msg)));
                 self.auth_status_item
                     .set_native_icon(Some(NativeIcon::StatusUnavailable));
-                self.auth_item.set_text("Authenticate Bear");
+                self.auth_item.set_text("Check Bear Access");
                 self.auth_item.set_enabled(true);
             }
         }
-        self.refresh_action_state();
-    }
-
-    fn on_auth_done(&mut self, result: Result<(), String>) {
-        self.is_authenticating = false;
-        match result {
-            Ok(()) => {
-                self.is_authenticated = true;
-                self.auth_status_item.set_text("Bear auth: connected");
-                self.auth_status_item
-                    .set_native_icon(Some(NativeIcon::StatusAvailable));
-                self.auth_item.set_text("Re-authenticate Bear");
-            }
-            Err(msg) => {
-                self.is_authenticated = false;
-                self.auth_status_item
-                    .set_text(format!("Bear auth: {}", concise_auth_error(&msg)));
-                self.auth_status_item
-                    .set_native_icon(Some(NativeIcon::Caution));
-                self.auth_item.set_text("Authenticate Bear");
-            }
-        }
-        self.auth_item.set_enabled(true);
         self.refresh_action_state();
     }
 
     fn start_sync(&mut self, force: bool) {
-        if self.is_syncing || self.is_authenticating || !self.is_authenticated {
+        if self.is_syncing || !self.is_bear_available {
             return;
         }
         self.is_syncing = true;
@@ -305,14 +258,6 @@ impl MenuBarApp {
                     .set_native_icon(Some(NativeIcon::Caution));
                 self.changes_item.set_text("Changes: unavailable");
                 self.changes_item.set_native_icon(Some(NativeIcon::Caution));
-                if is_auth_error_message(msg) {
-                    self.is_authenticated = false;
-                    self.auth_status_item.set_text("Bear auth: expired");
-                    self.auth_status_item
-                        .set_native_icon(Some(NativeIcon::StatusUnavailable));
-                    self.auth_item.set_text("Authenticate Bear");
-                    self.auth_item.set_enabled(true);
-                }
             }
         }
 
@@ -323,11 +268,10 @@ impl MenuBarApp {
     }
 
     fn refresh_action_state(&self) {
-        let can_sync = self.is_authenticated && !self.is_syncing && !self.is_authenticating;
+        let can_sync = self.is_bear_available && !self.is_syncing;
         self.sync_item.set_enabled(can_sync);
         self.force_item.set_enabled(can_sync);
-        self.auth_item
-            .set_enabled(!self.is_syncing && !self.is_authenticating);
+        self.auth_item.set_enabled(!self.is_syncing);
     }
 
     fn refresh_time_dependent_labels(&self) {
@@ -352,7 +296,7 @@ impl MenuBarApp {
             return;
         }
 
-        if self.is_authenticated && !self.is_syncing && !self.is_authenticating {
+        if self.is_bear_available && !self.is_syncing {
             self.start_sync(false);
         } else {
             self.next_auto_sync_at = next_auto_sync_deadline(&self.cfg);
@@ -374,7 +318,6 @@ impl ApplicationHandler<AppEvent> for MenuBarApp {
         match event {
             AppEvent::SyncDone(result) => self.on_sync_done(result),
             AppEvent::AuthChecked(result) => self.on_auth_checked(result),
-            AppEvent::AuthDone(result) => self.on_auth_done(result),
         }
     }
 
@@ -402,14 +345,14 @@ impl ApplicationHandler<AppEvent> for MenuBarApp {
 }
 
 fn do_sync(anki_url: &str, cfg: &Config, force: bool) -> Result<SyncReport, String> {
-    let ck = sync::load_client().map_err(|e| e.to_string())?;
+    let store = sync::load_client().map_err(|e| e.to_string())?;
     let mut state = SyncState::load().map_err(|e| e.to_string())?;
     let client = AnkiClient::new(anki_url);
 
     client.check_connection().map_err(|e| e.to_string())?;
 
     sync::sync(
-        &ck,
+        &store,
         &client,
         &mut state,
         &SyncOptions {
@@ -479,11 +422,7 @@ fn sync_changes_icon(report: &SyncReport) -> NativeIcon {
 }
 
 fn concise_auth_error(message: &str) -> String {
-    if is_auth_error_message(message) {
-        "not authenticated".to_owned()
-    } else {
-        truncate(message, 48)
-    }
+    truncate(message, 48)
 }
 
 fn truncate(input: &str, max_chars: usize) -> String {

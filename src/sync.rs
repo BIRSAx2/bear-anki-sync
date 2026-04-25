@@ -1,16 +1,13 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
-use bear_cli::cloudkit::auth::AuthConfig;
-use bear_cli::cloudkit::auth_server;
-use bear_cli::cloudkit::client::CloudKitClient;
+use bear_rs::SqliteStore;
 use sha2::{Digest, Sha256};
 
 use crate::anki::{AnkiClient, AnkiNote};
-use crate::auth_error::is_auth_error_message;
 use crate::config::Config;
-use crate::parser::{BearNote, Card, CardKind, parse_cards};
-use crate::render::render_for_anki;
+use crate::parser::{parse_cards, BearNote, Card, CardKind};
+use crate::render::{render_for_anki, NoteImage};
 use crate::state::SyncState;
 
 #[derive(Debug)]
@@ -30,73 +27,48 @@ pub struct SyncOptions<'a> {
     pub config: &'a Config,
 }
 
-pub fn load_client() -> Result<CloudKitClient> {
-    match try_load_validated_client() {
-        Ok(client) => Ok(client),
-        Err(err) if is_auth_error_message(&format!("{err:#}")) => {
-            eprintln!("bear-anki: CloudKit auth missing or expired, starting Apple sign-in...");
-            authenticate_client()
-        }
-        Err(err) => Err(err),
-    }
+pub fn load_client() -> Result<SqliteStore> {
+    SqliteStore::open_ro()
 }
 
 pub fn check_auth() -> Result<()> {
-    try_load_validated_client().map(|_| ())
+    load_client().map(|_| ())
 }
 
 pub fn authenticate() -> Result<()> {
-    authenticate_client().map(|_| ())
+    check_auth()
 }
 
-fn try_load_validated_client() -> Result<CloudKitClient> {
-    let client = CloudKitClient::new(AuthConfig::load()?)?;
-    client.list_tags()?;
-    Ok(client)
-}
-
-fn authenticate_client() -> Result<CloudKitClient> {
-    let token = auth_server::acquire_token()?;
-    let auth = AuthConfig {
-        ck_web_auth_token: token,
+pub fn export_notes(store: &SqliteStore, tag_filter: Option<&str>) -> Result<Vec<BearNote>> {
+    let list_input = bear_rs::store::ListInput {
+        tag: tag_filter,
+        include_tags: true,
+        ..Default::default()
     };
-    auth.save()?;
 
-    let client = CloudKitClient::new(auth)?;
-    client.list_tags()?;
-    Ok(client)
-}
-
-pub fn export_notes(client: &CloudKitClient, tag_filter: Option<&str>) -> Result<Vec<BearNote>> {
     let mut notes = Vec::new();
-    for record in client.list_notes(false, false, None)? {
-        let tags = record.string_list_field("tagsStrings");
-        if let Some(tag_filter) = tag_filter {
-            if !tags.iter().any(|tag| tag == tag_filter) {
-                continue;
-            }
-        }
+    for note in store.list_notes(&list_input)? {
         notes.push(BearNote {
-            identifier: record.record_name.clone(),
-            title: record.str_field("title").unwrap_or("").to_string(),
-            text: record.str_field("textADP").unwrap_or("").to_string(),
-            pinned: record.bool_field("pinned").unwrap_or(false),
-            created_at: record.i64_field("sf_creationDate"),
-            modified_at: record.i64_field("sf_modificationDate"),
-            tags,
+            identifier: note.id,
+            title: note.title,
+            text: note.text,
+            pinned: note.pinned,
+            created_at: Some(note.created),
+            modified_at: Some(note.modified),
+            tags: note.tags,
         });
     }
     Ok(notes)
 }
 
-pub fn note_title_map(client: &CloudKitClient) -> Result<HashMap<String, String>> {
+pub fn note_title_map(store: &SqliteStore) -> Result<HashMap<String, String>> {
     let mut titles = HashMap::new();
-    for note in client.list_notes(false, true, None)? {
-        let title = note.str_field("title").unwrap_or("").trim();
+    for note in store.list_notes(&Default::default())? {
+        let title = note.title.trim();
         titles.insert(
-            note.record_name.clone(),
+            note.id.clone(),
             if title.is_empty() {
-                note.record_name.clone()
+                note.id
             } else {
                 title.to_string()
             },
@@ -106,12 +78,12 @@ pub fn note_title_map(client: &CloudKitClient) -> Result<HashMap<String, String>
 }
 
 pub fn sync(
-    client_ck: &CloudKitClient,
+    store: &SqliteStore,
     client: &AnkiClient,
     state: &mut SyncState,
     opts: &SyncOptions<'_>,
 ) -> Result<SyncReport> {
-    let mut notes = export_notes(client_ck, opts.tag_filter)?;
+    let mut notes = export_notes(store, opts.tag_filter)?;
 
     if let Some(title) = opts.note_filter {
         let title_lower = title.to_lowercase();
@@ -138,9 +110,9 @@ pub fn sync(
 
     // Images are fetched lazily: only after we confirm a card needs add/update,
     // so skipped cards never trigger extra network calls.
-    let mut note_image_cache: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut note_image_cache: HashMap<String, Vec<NoteImage>> = HashMap::new();
     // Upload cache: deduplicate Anki media uploads within a single sync run.
-    // Keyed on CloudKit download URL → Anki filename (e.g. "bear_image.png").
+    // Keyed on Bear attachment identity → Anki filename (e.g. "bear_image.png").
     let mut upload_cache: HashMap<String, String> = HashMap::new();
 
     let mut report = SyncReport {
@@ -164,7 +136,7 @@ pub fn sync(
                 report.skipped += 1;
                 continue;
             }
-            let image_files = fetch_images_cached(&mut note_image_cache, client_ck, note_id)?;
+            let image_files = fetch_images_cached(&mut note_image_cache, store, note_id)?;
             let anki_note = build_anki_note(
                 card,
                 image_files,
@@ -200,7 +172,7 @@ pub fn sync(
             }
             report.updated += 1;
         } else {
-            let image_files = fetch_images_cached(&mut note_image_cache, client_ck, note_id)?;
+            let image_files = fetch_images_cached(&mut note_image_cache, store, note_id)?;
             let anki_note = build_anki_note(
                 card,
                 image_files,
@@ -260,49 +232,41 @@ pub fn sync(
 }
 
 fn fetch_images_cached<'a>(
-    cache: &'a mut HashMap<String, Vec<(String, String)>>,
-    client: &CloudKitClient,
+    cache: &'a mut HashMap<String, Vec<NoteImage>>,
+    store: &SqliteStore,
     note_id: &str,
-) -> Result<&'a [(String, String)]> {
+) -> Result<&'a [NoteImage]> {
     if !cache.contains_key(note_id) {
-        cache.insert(note_id.to_owned(), note_image_urls(client, note_id)?);
+        cache.insert(note_id.to_owned(), note_images(store, note_id)?);
     }
     Ok(cache[note_id].as_slice())
 }
 
-fn note_image_urls(client: &CloudKitClient, note_id: &str) -> Result<Vec<(String, String)>> {
-    let note = client.fetch_note(note_id)?;
-    let file_ids = note.string_list_field("files");
-    if file_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let refs: Vec<&str> = file_ids.iter().map(String::as_str).collect();
+fn note_images(store: &SqliteStore, note_id: &str) -> Result<Vec<NoteImage>> {
+    let attachments = store.list_attachments(Some(note_id), None)?;
     let mut out = Vec::new();
-    for file in client.lookup(&refs)? {
-        if file.record_type != "SFNoteImage" {
+    for attachment in attachments {
+        let Some(ext) = attachment.filename.rsplit('.').next() else {
+            continue;
+        };
+        if !matches!(
+            ext.to_ascii_lowercase().as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "bmp" | "tif" | "tiff"
+        ) {
             continue;
         }
-        let Some(filename) = file.str_field("filenameADP").map(str::to_string) else {
-            continue;
-        };
-        let Some(download_url) = file
-            .fields
-            .get("file")
-            .and_then(|f| f.value.get("downloadURL"))
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-        else {
-            continue;
-        };
-        out.push((filename, download_url));
+        out.push(NoteImage {
+            filename: attachment.filename.clone(),
+            upload_key: format!("{note_id}:{}", attachment.uuid),
+            data: store.read_attachment(Some(note_id), None, &attachment.filename)?,
+        });
     }
     Ok(out)
 }
 
 fn build_anki_note(
     card: &Card,
-    image_files: &[(String, String)],
+    image_files: &[NoteImage],
     bear_tags: &[String],
     client: &AnkiClient,
     config: &Config,
