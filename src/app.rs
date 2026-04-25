@@ -20,7 +20,6 @@ use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 #[derive(Debug)]
 enum AppEvent {
     SyncDone(Result<SyncReport, String>),
-    AuthChecked(Result<(), String>),
 }
 
 struct MenuBarApp {
@@ -28,9 +27,7 @@ struct MenuBarApp {
 
     sync_item: IconMenuItem,
     force_item: IconMenuItem,
-    auth_item: IconMenuItem,
     sync_status_item: IconMenuItem,
-    auth_status_item: IconMenuItem,
     last_sync_item: IconMenuItem,
     changes_item: IconMenuItem,
     card_count_item: IconMenuItem,
@@ -41,7 +38,6 @@ struct MenuBarApp {
     cfg: Config,
 
     is_syncing: bool,
-    is_bear_available: bool,
     card_count: usize,
     last_sync_at: Option<SystemTime>,
     last_sync_failed_message: Option<String>,
@@ -67,22 +63,10 @@ impl MenuBarApp {
                 Some(NativeIcon::RefreshFreestanding),
                 None,
             ),
-            auth_item: IconMenuItem::with_native_icon(
-                "Check Bear Access",
-                true,
-                Some(NativeIcon::User),
-                None,
-            ),
             sync_status_item: IconMenuItem::with_native_icon(
                 "Sync: idle",
                 false,
                 Some(NativeIcon::StatusNone),
-                None,
-            ),
-            auth_status_item: IconMenuItem::with_native_icon(
-                "Bear: checking access...",
-                false,
-                Some(NativeIcon::StatusPartiallyAvailable),
                 None,
             ),
             last_sync_item: IconMenuItem::with_native_icon(
@@ -113,7 +97,6 @@ impl MenuBarApp {
             anki_url,
             cfg,
             is_syncing: false,
-            is_bear_available: false,
             card_count,
             last_sync_at: None,
             last_sync_failed_message: None,
@@ -125,10 +108,8 @@ impl MenuBarApp {
         let menu = Menu::new();
         menu.append(&self.sync_item).unwrap();
         menu.append(&self.force_item).unwrap();
-        menu.append(&self.auth_item).unwrap();
         menu.append(&PredefinedMenuItem::separator()).unwrap();
         menu.append(&self.sync_status_item).unwrap();
-        menu.append(&self.auth_status_item).unwrap();
         menu.append(&self.last_sync_item).unwrap();
         menu.append(&self.changes_item).unwrap();
         menu.append(&self.card_count_item).unwrap();
@@ -145,49 +126,8 @@ impl MenuBarApp {
             .expect("failed to create tray icon")
     }
 
-    fn refresh_auth_status(&mut self) {
-        self.auth_status_item.set_text("Bear: checking access...");
-        self.auth_status_item
-            .set_native_icon(Some(NativeIcon::StatusPartiallyAvailable));
-        self.auth_item.set_text("Check Bear Access");
-        self.auth_item.set_enabled(false);
-
-        let proxy = self.proxy.clone();
-        thread::spawn(move || {
-            let result = sync::check_auth().map_err(|e| e.to_string());
-            let _ = proxy.send_event(AppEvent::AuthChecked(result));
-        });
-    }
-
-    fn start_authenticate(&mut self) {
-        self.refresh_auth_status();
-    }
-
-    fn on_auth_checked(&mut self, result: Result<(), String>) {
-        match result {
-            Ok(()) => {
-                self.is_bear_available = true;
-                self.auth_status_item.set_text("Bear: available");
-                self.auth_status_item
-                    .set_native_icon(Some(NativeIcon::StatusAvailable));
-                self.auth_item.set_text("Re-check Bear Access");
-                self.auth_item.set_enabled(true);
-            }
-            Err(msg) => {
-                self.is_bear_available = false;
-                self.auth_status_item
-                    .set_text(format!("Bear: {}", concise_auth_error(&msg)));
-                self.auth_status_item
-                    .set_native_icon(Some(NativeIcon::StatusUnavailable));
-                self.auth_item.set_text("Check Bear Access");
-                self.auth_item.set_enabled(true);
-            }
-        }
-        self.refresh_action_state();
-    }
-
     fn start_sync(&mut self, force: bool) {
-        if self.is_syncing || !self.is_bear_available {
+        if self.is_syncing {
             return;
         }
         self.is_syncing = true;
@@ -268,10 +208,9 @@ impl MenuBarApp {
     }
 
     fn refresh_action_state(&self) {
-        let can_sync = self.is_bear_available && !self.is_syncing;
+        let can_sync = !self.is_syncing;
         self.sync_item.set_enabled(can_sync);
         self.force_item.set_enabled(can_sync);
-        self.auth_item.set_enabled(!self.is_syncing);
     }
 
     fn refresh_time_dependent_labels(&self) {
@@ -296,7 +235,7 @@ impl MenuBarApp {
             return;
         }
 
-        if self.is_bear_available && !self.is_syncing {
+        if !self.is_syncing {
             self.start_sync(false);
         } else {
             self.next_auto_sync_at = next_auto_sync_deadline(&self.cfg);
@@ -308,7 +247,6 @@ impl ApplicationHandler<AppEvent> for MenuBarApp {
     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
         if self.tray.is_none() {
             self.tray = Some(self.build_tray());
-            self.refresh_auth_status();
         }
     }
 
@@ -317,7 +255,6 @@ impl ApplicationHandler<AppEvent> for MenuBarApp {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
             AppEvent::SyncDone(result) => self.on_sync_done(result),
-            AppEvent::AuthChecked(result) => self.on_auth_checked(result),
         }
     }
 
@@ -335,8 +272,6 @@ impl ApplicationHandler<AppEvent> for MenuBarApp {
                 self.start_sync(false);
             } else if event.id == *self.force_item.id() {
                 self.start_sync(true);
-            } else if event.id == *self.auth_item.id() {
-                self.start_authenticate();
             } else if event.id == *self.quit_item.id() {
                 event_loop.exit();
             }
@@ -419,10 +354,6 @@ fn sync_changes_icon(report: &SyncReport) -> NativeIcon {
     } else {
         NativeIcon::ListView
     }
-}
-
-fn concise_auth_error(message: &str) -> String {
-    truncate(message, 48)
 }
 
 fn truncate(input: &str, max_chars: usize) -> String {

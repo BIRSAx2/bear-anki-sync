@@ -31,14 +31,6 @@ pub fn load_client() -> Result<SqliteStore> {
     SqliteStore::open_ro()
 }
 
-pub fn check_auth() -> Result<()> {
-    load_client().map(|_| ())
-}
-
-pub fn authenticate() -> Result<()> {
-    check_auth()
-}
-
 pub fn export_notes(store: &SqliteStore, tag_filter: Option<&str>) -> Result<Vec<BearNote>> {
     let list_input = bear_rs::store::ListInput {
         tag: tag_filter,
