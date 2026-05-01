@@ -1,3 +1,5 @@
+use std::collections::{BTreeSet, HashMap};
+
 use bear_rs::frontmatter::parse_front_matter;
 use sha2::{Digest, Sha256};
 
@@ -15,6 +17,7 @@ pub struct Card {
     pub deck: String,
     pub fingerprint: String,
     pub callout_type: String, // "card", "tip", "note", "important"
+    pub sort_key: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +37,52 @@ pub struct BearNote {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeadingLevel {
+    title: String,
+    ordinal: usize,
+    width: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeadingOrder {
+    ordinal: usize,
+    width: usize,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct HeadingOrders {
+    h2: HashMap<(usize, usize), HeadingOrder>,
+    h3: HashMap<(usize, usize, usize), HeadingOrder>,
+}
+
+impl HeadingOrders {
+    fn h2_order(&self, h1_section: usize, raw_h2_ordinal: usize) -> HeadingOrder {
+        self.h2
+            .get(&(h1_section, raw_h2_ordinal))
+            .copied()
+            .unwrap_or_else(|| HeadingOrder {
+                ordinal: raw_h2_ordinal,
+                width: order_width_for_count(raw_h2_ordinal),
+            })
+    }
+
+    fn h3_order(
+        &self,
+        h1_section: usize,
+        raw_h2_ordinal: usize,
+        raw_h3_ordinal: usize,
+    ) -> HeadingOrder {
+        self.h3
+            .get(&(h1_section, raw_h2_ordinal, raw_h3_ordinal))
+            .copied()
+            .unwrap_or_else(|| HeadingOrder {
+                ordinal: raw_h3_ordinal,
+                width: order_width_for_count(raw_h3_ordinal),
+            })
+    }
+}
+
 pub fn parse_cards(note: &BearNote) -> Vec<Card> {
     let (frontmatter, body) = parse_front_matter(&note.text);
     let body = strip_html_comments(&body);
@@ -45,23 +94,41 @@ pub fn parse_cards(note: &BearNote) -> Vec<Card> {
 
     let mut cards = Vec::new();
     let mut h1 = note.title.trim().to_owned();
-    let mut h2: Option<String> = None;
-    let mut h3: Option<String> = None;
+    let mut h2: Option<HeadingLevel> = None;
+    let mut h3: Option<HeadingLevel> = None;
+    let mut h1_section = 0usize;
+    let mut h2_ordinal = 0usize;
+    let mut h3_ordinal = 0usize;
+    let mut card_ordinal = 0usize;
 
     let lines: Vec<&str> = body.lines().collect();
+    let heading_orders = compute_heading_orders(&lines);
     let mut index = 0;
 
     while index < lines.len() {
         let line = lines[index];
 
         if let Some(heading) = line.strip_prefix("### ") {
-            h3 = Some(heading.trim().to_owned());
+            h3_ordinal += 1;
+            let order = heading_orders.h3_order(h1_section, h2_ordinal, h3_ordinal);
+            h3 = Some(HeadingLevel {
+                title: heading.trim().to_owned(),
+                ordinal: order.ordinal,
+                width: order.width,
+            });
             index += 1;
             continue;
         }
         if let Some(heading) = line.strip_prefix("## ") {
-            h2 = Some(heading.trim().to_owned());
+            h2_ordinal += 1;
+            let order = heading_orders.h2_order(h1_section, h2_ordinal);
+            h2 = Some(HeadingLevel {
+                title: heading.trim().to_owned(),
+                ordinal: order.ordinal,
+                width: order.width,
+            });
             h3 = None;
+            h3_ordinal = 0;
             index += 1;
             continue;
         }
@@ -69,6 +136,9 @@ pub fn parse_cards(note: &BearNote) -> Vec<Card> {
             h1 = heading.trim().to_owned();
             h2 = None;
             h3 = None;
+            h1_section += 1;
+            h2_ordinal = 0;
+            h3_ordinal = 0;
             index += 1;
             continue;
         }
@@ -97,9 +167,11 @@ pub fn parse_cards(note: &BearNote) -> Vec<Card> {
 
             let deck = deck_override
                 .clone()
-                .unwrap_or_else(|| build_deck(&h1, h2.as_deref(), h3.as_deref()));
+                .unwrap_or_else(|| build_deck(&h1, h2.as_ref(), h3.as_ref()));
 
-            if let Some(card) = classify_card(title, body_lines, deck, callout_type) {
+            let sort_key = (card_ordinal + 1).to_string();
+            if let Some(card) = classify_card(title, body_lines, deck, callout_type, sort_key) {
+                card_ordinal += 1;
                 cards.push(card);
             } else {
                 eprintln!(
@@ -113,7 +185,126 @@ pub fn parse_cards(note: &BearNote) -> Vec<Card> {
         index += 1;
     }
 
+    let card_width = order_width_for_count(cards.len());
+    for (index, card) in cards.iter_mut().enumerate() {
+        card.sort_key = format_order_key(index + 1, card_width);
+    }
+
     cards
+}
+
+fn compute_heading_orders(lines: &[&str]) -> HeadingOrders {
+    let mut used_h2: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut used_h3: BTreeSet<(usize, usize, usize)> = BTreeSet::new();
+    let mut h1_section = 0usize;
+    let mut h2_ordinal = 0usize;
+    let mut h3_ordinal = 0usize;
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let line = lines[index];
+
+        if line.strip_prefix("### ").is_some() {
+            h3_ordinal += 1;
+            index += 1;
+            continue;
+        }
+        if line.strip_prefix("## ").is_some() {
+            h2_ordinal += 1;
+            h3_ordinal = 0;
+            index += 1;
+            continue;
+        }
+        if line.strip_prefix("# ").is_some() {
+            h1_section += 1;
+            h2_ordinal = 0;
+            h3_ordinal = 0;
+            index += 1;
+            continue;
+        }
+
+        if let Some((_callout_type, rest)) = detect_callout(line) {
+            let title = rest.strip_prefix(' ').unwrap_or("").trim().to_owned();
+            let title = if title.is_empty() { None } else { Some(title) };
+
+            let mut body_lines: Vec<String> = Vec::new();
+            index += 1;
+            while index < lines.len() {
+                let body_line = lines[index];
+                if body_line.is_empty() {
+                    break;
+                }
+                if let Some(content) = body_line.strip_prefix("> ") {
+                    body_lines.push(content.to_owned());
+                } else if body_line == ">" {
+                    body_lines.push(String::new());
+                } else {
+                    break;
+                }
+                index += 1;
+            }
+
+            if is_valid_card(title.as_deref(), &body_lines) {
+                if h2_ordinal > 0 {
+                    used_h2.insert((h1_section, h2_ordinal));
+                }
+                if h3_ordinal > 0 {
+                    used_h3.insert((h1_section, h2_ordinal, h3_ordinal));
+                }
+            }
+            continue;
+        }
+
+        index += 1;
+    }
+
+    build_heading_orders(used_h2, used_h3)
+}
+
+fn build_heading_orders(
+    used_h2: BTreeSet<(usize, usize)>,
+    used_h3: BTreeSet<(usize, usize, usize)>,
+) -> HeadingOrders {
+    let mut h2_by_h1: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (h1_section, h2_ordinal) in used_h2 {
+        h2_by_h1.entry(h1_section).or_default().push(h2_ordinal);
+    }
+
+    let mut h3_by_parent: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for (h1_section, h2_ordinal, h3_ordinal) in used_h3 {
+        h3_by_parent
+            .entry((h1_section, h2_ordinal))
+            .or_default()
+            .push(h3_ordinal);
+    }
+
+    let mut orders = HeadingOrders::default();
+    for (h1_section, h2_ordinals) in h2_by_h1 {
+        let width = order_width_for_count(h2_ordinals.len());
+        for (index, h2_ordinal) in h2_ordinals.into_iter().enumerate() {
+            orders.h2.insert(
+                (h1_section, h2_ordinal),
+                HeadingOrder {
+                    ordinal: index + 1,
+                    width,
+                },
+            );
+        }
+    }
+    for ((h1_section, h2_ordinal), h3_ordinals) in h3_by_parent {
+        let width = order_width_for_count(h3_ordinals.len());
+        for (index, h3_ordinal) in h3_ordinals.into_iter().enumerate() {
+            orders.h3.insert(
+                (h1_section, h2_ordinal, h3_ordinal),
+                HeadingOrder {
+                    ordinal: index + 1,
+                    width,
+                },
+            );
+        }
+    }
+
+    orders
 }
 
 fn strip_html_comments(input: &str) -> String {
@@ -149,6 +340,7 @@ fn classify_card(
     body_lines: Vec<String>,
     deck: String,
     callout_type: String,
+    sort_key: String,
 ) -> Option<Card> {
     let has_cloze = body_lines.iter().any(|line| line.contains("{{"));
 
@@ -161,6 +353,7 @@ fn classify_card(
             deck,
             fingerprint: fp,
             callout_type,
+            sort_key,
         });
     }
 
@@ -172,6 +365,7 @@ fn classify_card(
             deck,
             fingerprint: fp,
             callout_type,
+            sort_key,
         });
     }
 
@@ -189,21 +383,51 @@ fn classify_card(
             deck,
             fingerprint: fp,
             callout_type,
+            sort_key,
         });
     }
 
     None
 }
 
-fn build_deck(h1: &str, h2: Option<&str>, h3: Option<&str>) -> String {
-    let mut parts = vec![h1];
+fn is_valid_card(title: Option<&str>, body_lines: &[String]) -> bool {
+    if body_lines.iter().any(|line| line.contains("{{")) {
+        return true;
+    }
+    if title.is_some() {
+        return true;
+    }
+    if let Some(sep) = body_lines.iter().position(|line| line.trim() == "---") {
+        return !body_lines[..sep].join("\n").trim().is_empty();
+    }
+    false
+}
+
+fn build_deck(h1: &str, h2: Option<&HeadingLevel>, h3: Option<&HeadingLevel>) -> String {
+    let mut parts = vec![h1.to_owned()];
     if let Some(h) = h2 {
-        parts.push(h);
+        parts.push(ordered_heading(h));
     }
     if let Some(h) = h3 {
-        parts.push(h);
+        parts.push(ordered_heading(h));
     }
     parts.join("::")
+}
+
+fn ordered_heading(heading: &HeadingLevel) -> String {
+    format!(
+        "{}.{}",
+        format_order_key(heading.ordinal, heading.width),
+        heading.title
+    )
+}
+
+fn order_width_for_count(count: usize) -> usize {
+    count.max(1).to_string().len()
+}
+
+fn format_order_key(ordinal: usize, width: usize) -> String {
+    format!("{ordinal:0width$}")
 }
 
 fn convert_cloze(text: &str) -> String {
@@ -290,7 +514,7 @@ mod tests {
         assert_eq!(cards.len(), 1);
         assert_eq!(
             cards[0].deck,
-            "Systems Security::Access Control and Authentication"
+            "Systems Security::1.Access Control and Authentication"
         );
     }
 
@@ -356,7 +580,7 @@ mod tests {
             "# System Security\n## Chapter 1\n### Topic A\n\n> [!CARD] Question?\n> Answer.",
         );
         let cards = parse_cards(&note);
-        assert_eq!(cards[0].deck, "System Security::Chapter 1::Topic A");
+        assert_eq!(cards[0].deck, "System Security::1.Chapter 1::1.Topic A");
     }
 
     #[test]
@@ -366,7 +590,7 @@ mod tests {
             "# Deck\n## Part 1\n### Section A\n## Part 2\n\n> [!CARD] Q?\n> A.",
         );
         let cards = parse_cards(&note);
-        assert_eq!(cards[0].deck, "Deck::Part 2");
+        assert_eq!(cards[0].deck, "Deck::1.Part 2");
     }
 
     #[test]
@@ -414,6 +638,85 @@ mod tests {
         );
         let cards = parse_cards(&note);
         assert_eq!(cards.len(), 2);
+    }
+
+    #[test]
+    fn assigns_order_keys_from_card_source_order() {
+        let note = make_note(
+            "Deck",
+            "# Deck\n\n> [!CARD] Q1?\n> A1.\n\n> [!CARD] Q2?\n> A2.",
+        );
+        let cards = parse_cards(&note);
+        assert_eq!(cards[0].sort_key, "1");
+        assert_eq!(cards[1].sort_key, "2");
+    }
+
+    #[test]
+    fn prefixes_sibling_decks_from_heading_source_order() {
+        let note = make_note(
+            "Deck",
+            "# Deck\n## A1\n\n> [!CARD] Q1?\n> A1.\n## A2\n\n> [!CARD] Q2?\n> A2.\n## A10\n\n> [!CARD] Q3?\n> A3.",
+        );
+        let cards = parse_cards(&note);
+        assert_eq!(cards[0].deck, "Deck::1.A1");
+        assert_eq!(cards[1].deck, "Deck::2.A2");
+        assert_eq!(cards[2].deck, "Deck::3.A10");
+    }
+
+    #[test]
+    fn pads_sibling_decks_only_to_the_width_needed() {
+        let mut text = String::from("# Deck\n");
+        for n in 1..=10 {
+            text.push_str(&format!("## A{n}\n\n> [!CARD] Q{n}?\n> A.\n\n"));
+        }
+        let note = make_note("Deck", &text);
+        let cards = parse_cards(&note);
+        assert_eq!(cards[0].deck, "Deck::01.A1");
+        assert_eq!(cards[9].deck, "Deck::10.A10");
+    }
+
+    #[test]
+    fn unused_headings_do_not_consume_deck_order_numbers() {
+        let note = make_note(
+            "Deck",
+            "# Deck\n## A1\n\n> [!CARD] Q1?\n> A.\n\n## A2\n## A3\n## A4\n## A5\n## A6\n## A7\n## A8\n## A9\n## A10\n\n> [!CARD] Q10?\n> A.",
+        );
+        let cards = parse_cards(&note);
+        assert_eq!(cards[0].deck, "Deck::1.A1");
+        assert_eq!(cards[1].deck, "Deck::2.A10");
+    }
+
+    #[test]
+    fn parent_heading_numbering_uses_descendant_cards() {
+        let note = make_note(
+            "Deck",
+            "# Deck\n## Empty\n### Also Empty\n## Used Parent\n### Used Topic\n\n> [!CARD] Q?\n> A.",
+        );
+        let cards = parse_cards(&note);
+        assert_eq!(cards[0].deck, "Deck::1.Used Parent::1.Used Topic");
+    }
+
+    #[test]
+    fn unused_h3_headings_do_not_consume_deck_order_numbers() {
+        let note = make_note(
+            "Deck",
+            "# Deck\n## Chapter\n### Empty\n### Topic A\n\n> [!CARD] Q1?\n> A.\n\n### Topic B\n\n> [!CARD] Q2?\n> A.",
+        );
+        let cards = parse_cards(&note);
+        assert_eq!(cards[0].deck, "Deck::1.Chapter::1.Topic A");
+        assert_eq!(cards[1].deck, "Deck::1.Chapter::2.Topic B");
+    }
+
+    #[test]
+    fn pads_card_order_keys_only_to_the_width_needed() {
+        let note = make_note(
+            "Deck",
+            "# Deck\n\n> [!CARD] Q1?\n> A.\n\n> [!CARD] Q2?\n> A.\n\n> [!CARD] Q3?\n> A.\n\n> [!CARD] Q4?\n> A.\n\n> [!CARD] Q5?\n> A.\n\n> [!CARD] Q6?\n> A.\n\n> [!CARD] Q7?\n> A.\n\n> [!CARD] Q8?\n> A.\n\n> [!CARD] Q9?\n> A.\n\n> [!CARD] Q10?\n> A.",
+        );
+        let cards = parse_cards(&note);
+        assert_eq!(cards[0].sort_key, "01");
+        assert_eq!(cards[8].sort_key, "09");
+        assert_eq!(cards[9].sort_key, "10");
     }
 
     #[test]

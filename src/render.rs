@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use base64::Engine as _;
 use pulldown_cmark::{html, Options, Parser};
+use sha2::{Digest, Sha256};
 
 use crate::anki::AnkiClient;
 
@@ -10,7 +11,25 @@ use crate::anki::AnkiClient;
 pub struct NoteImage {
     pub filename: String,
     pub upload_key: String,
+    pub content_hash: String,
     pub data: Vec<u8>,
+}
+
+impl NoteImage {
+    pub fn new(filename: String, upload_key: String, data: Vec<u8>) -> Self {
+        let content_hash = short_hash(&data);
+        Self {
+            filename,
+            upload_key,
+            content_hash,
+            data,
+        }
+    }
+
+    pub fn anki_filename(&self) -> String {
+        let suffix = short_hash(self.upload_key.as_bytes());
+        format!("bear_{suffix}_{}", self.filename)
+    }
 }
 
 /// Render card text for Anki:
@@ -21,7 +40,7 @@ pub struct NoteImage {
 ///
 /// `image_files`   — images attached to this note.
 /// `upload_cache`  — deduplicate uploads across multiple `render_for_anki` calls for the
-///                   same note (keyed on attachment identity → Anki filename).
+///                   same note (keyed on attachment identity -> Anki filename).
 pub fn render_for_anki(
     text: &str,
     image_files: &[NoteImage],
@@ -148,8 +167,8 @@ fn replace_math_delimiters(
 /// Uploads images referenced in `text` to Anki and replaces `![alt](filename)` with
 /// `<img src="bear_filename" alt="alt">` tags.
 ///
-/// Already-uploaded images are served from `upload_cache` (keyed on download URL) to
-/// avoid re-downloading and re-uploading the same file for multiple cards in one sync.
+/// Already-uploaded images are served from `upload_cache` to avoid re-uploading
+/// the same file for multiple cards in one sync.
 fn process_images(
     text: &str,
     image_files: &[NoteImage],
@@ -163,24 +182,14 @@ fn process_images(
     let mut result = text.to_owned();
     for image in image_files {
         let filename = image.filename.as_str();
-        // Bear percent-encodes filenames in Markdown links (e.g. "my image.png" → "my%20image.png").
-        // Build the encoded pattern first; fall back to the raw filename if unencoded.
-        let encoded_pat = format!("]({})", percent_encode_filename(filename));
-        let md_pattern = if result.contains(&encoded_pat) {
-            encoded_pat
-        } else {
-            let raw_pat = format!("]({})", filename);
-            if result.contains(&raw_pat) {
-                raw_pat
-            } else {
-                continue;
-            }
+        let Some(md_pattern) = markdown_image_pattern(&result, filename) else {
+            continue;
         };
 
         let anki_filename = if let Some(cached) = upload_cache.get(image.upload_key.as_str()) {
             cached.clone()
         } else {
-            match upload_image(filename, &image.data, client) {
+            match upload_image(image, client) {
                 Ok(name) => {
                     upload_cache.insert(image.upload_key.clone(), name.clone());
                     name
@@ -196,6 +205,25 @@ fn process_images(
     }
 
     Ok(result)
+}
+
+pub fn referenced_images<'a>(text: &str, image_files: &'a [NoteImage]) -> Vec<&'a NoteImage> {
+    image_files
+        .iter()
+        .filter(|image| markdown_image_pattern(text, &image.filename).is_some())
+        .collect()
+}
+
+fn markdown_image_pattern(text: &str, filename: &str) -> Option<String> {
+    // Bear percent-encodes filenames in Markdown links (e.g. "my image.png" -> "my%20image.png").
+    // Build the encoded pattern first; fall back to the raw filename if unencoded.
+    let encoded_pat = format!("]({})", percent_encode_filename(filename));
+    if text.contains(&encoded_pat) {
+        return Some(encoded_pat);
+    }
+
+    let raw_pat = format!("]({filename})");
+    text.contains(&raw_pat).then_some(raw_pat)
 }
 
 /// Replace every `![alt](…pattern…)` in `text` with an `<img>` tag.
@@ -258,11 +286,16 @@ fn percent_encode_filename(name: &str) -> String {
     out
 }
 
-fn upload_image(filename: &str, data: &[u8], client: &AnkiClient) -> Result<String> {
-    let base64_data = base64::engine::general_purpose::STANDARD.encode(data);
-    let filename = format!("bear_{filename}");
+fn upload_image(image: &NoteImage, client: &AnkiClient) -> Result<String> {
+    let base64_data = base64::engine::general_purpose::STANDARD.encode(&image.data);
+    let filename = image.anki_filename();
     client.store_media_file(&filename, &base64_data)?;
     Ok(filename)
+}
+
+fn short_hash(data: &[u8]) -> String {
+    let digest = Sha256::digest(data);
+    hex::encode(&digest[..8])
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -271,7 +304,7 @@ fn upload_image(filename: &str, data: &[u8], client: &AnkiClient) -> Result<Stri
 mod tests {
     use super::{
         convert_math, convert_math_html, escape_html_attr, percent_encode_filename,
-        replace_md_image_with_pattern,
+        referenced_images, replace_md_image_with_pattern, NoteImage,
     };
 
     // Thin wrapper used only in tests — mirrors what process_images does per image.
@@ -411,6 +444,31 @@ mod tests {
             "bear_my image.png",
         );
         assert_eq!(out, "See <img src=\"bear_my image.png\"> here");
+    }
+
+    #[test]
+    fn referenced_images_finds_raw_and_percent_encoded_filenames() {
+        let images = vec![
+            NoteImage::new(
+                "my image.png".into(),
+                "note:image-1".into(),
+                b"one".to_vec(),
+            ),
+            NoteImage::new("other.png".into(), "note:image-2".into(), b"two".to_vec()),
+        ];
+
+        let refs = referenced_images("See ![](my%20image.png)", &images);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].filename, "my image.png");
+    }
+
+    #[test]
+    fn anki_filenames_include_attachment_identity_hash() {
+        let a = NoteImage::new("image.png".into(), "note-a:image".into(), b"same".to_vec());
+        let b = NoteImage::new("image.png".into(), "note-b:image".into(), b"same".to_vec());
+        assert_ne!(a.anki_filename(), b.anki_filename());
+        assert!(a.anki_filename().starts_with("bear_"));
+        assert!(a.anki_filename().ends_with("_image.png"));
     }
 
     #[test]

@@ -107,11 +107,22 @@ The Anki deck path mirrors the heading context at the card's position:
 > Authenticated encryption mode : provides both confidentiality and integrity. Nonce must never be reused.
 ```
 
-This card lands in **Systems Security::Cryptography::Symmetric Encryption**.
+This card lands in **Systems Security::1.Cryptography::1.Symmetric Encryption**.
 
 Rules:
 - A new `##` clears the active `###`.
 - A new `#` clears both `##` and `###`.
+- Sibling `##` and `###` decks are prefixed with a source-order number so Anki's deck tree sorts them in Bear order. Only headings with direct or descendant cards consume a number. Padding is only added when that generated sibling deck count needs it, e.g. `1.A`, `2.B` for two generated sibling decks and `01.A`, `02.B`, ... `10.J` for ten.
+
+### Ordering
+
+Within a Bear note, decks and cards carry explicit ordering metadata:
+
+- Heading decks are named with ordered path components such as `Systems::1.Cryptography::2.Hashing`, or `Systems::01.Cryptography` when that level has ten or more siblings.
+- Cards are synced in Bear source order.
+- Basic cards get a hidden order prefix in the Anki `Front` field, and cloze cards get it in the `Text` field. Sort the Anki browser by **Sort Field** to see cards in Bear order without showing the prefix during review.
+
+Frontmatter `anki-deck` is treated as an exact deck path, so heading-order deck prefixes are not added when it is set.
 
 ### Frontmatter deck override
 
@@ -274,6 +285,7 @@ This means:
 | Edit the back / cloze text | Card updated in place |
 | Edit the front of a basic card | Old card deleted, new card added |
 | Move a card to a different heading (deck) | Card moved in Anki |
+| Reorder a card within the same heading | Card updated in place |
 | Delete the callout from Bear | Card deleted from Anki |
 
 ### State file
@@ -282,7 +294,7 @@ The sync state lives at `~/Library/Application Support/bear-anki/state.json`. It
 
 ### Content hash
 
-A separate SHA-256 hash covers the full card content (deck, callout type, front, back). This is what determines whether a card needs to be updated : the fingerprint only determines *identity*, while the hash determines *whether the content changed*.
+A separate SHA-256 hash covers the full card content (deck, source-order key, callout type, front, back). This is what determines whether a card needs to be updated : the fingerprint only determines *identity*, while the hash determines *whether the content changed*.
 
 ---
 
