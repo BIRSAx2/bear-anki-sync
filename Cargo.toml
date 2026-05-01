@@ -1,6 +1,6 @@
 [package]
 name = "bear-anki-sync"
-version = "0.4.1"
+version = "0.4.2"
 description = "Sync flashcards from Bear.app to Anki via AnkiConnect"
 edition = "2021"
 rust-version = "1.85"
