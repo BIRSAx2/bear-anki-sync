@@ -27,7 +27,7 @@ This installs the `bear-anki` command to `~/.cargo/bin/`.
 
 ### Menu bar app
 
-`bear-anki-app` must be packaged as a `.app` bundle to appear in Launchpad and Spotlight. After `cargo install`, run the binary once with `--install`:
+After `cargo install`, run `bear-anki-app --install` to install the menu bar app:
 
 ```sh
 cargo install bear-anki-sync
@@ -35,7 +35,7 @@ bear-anki-app --install                          # installs to ~/Applications
 bear-anki-app --install --apps-dir /Applications # installs system-wide
 ```
 
-This wraps the installed binary in `BearAnki.app`, generates an app icon from the bundled SVG, and registers the bundle with Launch Services so it appears immediately in Launchpad and Spotlight. Safe to re-run after upgrading.
+Safe to re-run after upgrading.
 
 `bear-anki-sync` reads notes and attachments directly from Bear's local SQLite database via `bear-rs`, so no CloudKit sign-in is needed.
 

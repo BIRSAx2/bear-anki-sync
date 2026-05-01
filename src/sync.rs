@@ -10,6 +10,8 @@ use crate::parser::{parse_cards, BearNote, Card, CardKind};
 use crate::render::{referenced_images, render_for_anki, NoteImage};
 use crate::state::SyncState;
 
+const ANKI_BATCH_SIZE: usize = 50;
+
 #[derive(Debug)]
 pub struct SyncReport {
     pub added: usize,
@@ -26,6 +28,21 @@ pub struct SyncOptions<'a> {
     pub verbose: bool,
     pub progress: bool,
     pub config: &'a Config,
+}
+
+struct PendingAdd {
+    note_id: String,
+    fp: String,
+    hash: String,
+    note: AnkiNote,
+}
+
+struct PendingUpdate {
+    note_id: String,
+    fp: String,
+    hash: String,
+    anki_id: u64,
+    note: AnkiNote,
 }
 
 pub fn load_client() -> Result<SqliteStore> {
@@ -128,6 +145,9 @@ pub fn sync(
         deleted: 0,
         skipped: 0,
     };
+    let mut pending_adds = Vec::new();
+    let mut pending_updates = Vec::new();
+    let mut created_decks = HashSet::new();
 
     let total_cards = current_order.len();
     for (index, (note_id, fp)) in current_order.iter().enumerate() {
@@ -162,7 +182,7 @@ pub fn sync(
 
             if opts.progress {
                 println!(
-                    "[update] {}/{} {} — {}",
+                    "[prepare update] {}/{} {} — {}",
                     index + 1,
                     total_cards,
                     card.deck,
@@ -177,27 +197,16 @@ pub fn sync(
                 opts.config,
                 &mut upload_cache,
             )?;
-            client.create_deck(&card.deck)?;
-            let update_result = client.update_note(anki_id, &anki_note.fields, &anki_note.tags);
-            match update_result {
-                Ok(()) => {
-                    client.move_note_to_deck(anki_id, &card.deck)?;
-                    state.set_hash(note_id, fp, hash);
-                    state.save()?;
-                }
-                Err(err) if is_note_not_found(&err) => {
-                    eprintln!("bear-anki: note {anki_id} not found in Anki, re-adding");
-                    let new_id = client.add_note(&anki_note)?;
-                    state.insert(note_id, fp, new_id);
-                    state.set_hash(note_id, fp, hash);
-                    state.save()?;
-                }
-                Err(err) => return Err(err),
-            }
             if opts.verbose && !opts.progress {
                 println!("[update] {} — {}", card.deck, card_preview(card));
             }
-            report.updated += 1;
+            pending_updates.push(PendingUpdate {
+                note_id: note_id.clone(),
+                fp: fp.clone(),
+                hash,
+                anki_id,
+                note: anki_note,
+            });
         } else {
             if opts.dry_run {
                 println!(
@@ -211,7 +220,7 @@ pub fn sync(
 
             if opts.progress {
                 println!(
-                    "[add]    {}/{} {} — {}",
+                    "[prepare add]    {}/{} {} — {}",
                     index + 1,
                     total_cards,
                     card.deck,
@@ -226,17 +235,35 @@ pub fn sync(
                 opts.config,
                 &mut upload_cache,
             )?;
-            client.create_deck(&card.deck)?;
-            let anki_id = client.add_note(&anki_note)?;
-            state.insert(note_id, fp, anki_id);
-            state.set_hash(note_id, fp, hash);
-            state.save()?;
             if opts.verbose && !opts.progress {
                 println!("[add]    {} — {}", card.deck, card_preview(card));
             }
-            report.added += 1;
+            pending_adds.push(PendingAdd {
+                note_id: note_id.clone(),
+                fp: fp.clone(),
+                hash,
+                note: anki_note,
+            });
         }
     }
+
+    apply_update_batches(
+        client,
+        state,
+        &mut report,
+        &mut created_decks,
+        pending_updates,
+        opts.progress,
+    )?;
+    apply_add_batches(
+        client,
+        state,
+        &mut report,
+        &mut created_decks,
+        pending_adds,
+        opts.progress,
+        true,
+    )?;
 
     let stale: Vec<(String, String, u64)> = state
         .all_keys()
@@ -273,6 +300,142 @@ pub fn sync(
     }
 
     Ok(report)
+}
+
+fn apply_add_batches(
+    client: &AnkiClient,
+    state: &mut SyncState,
+    report: &mut SyncReport,
+    created_decks: &mut HashSet<String>,
+    pending: Vec<PendingAdd>,
+    progress: bool,
+    count_as_added: bool,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    ensure_decks(
+        client,
+        created_decks,
+        pending.iter().map(|item| item.note.deck.as_str()),
+    )?;
+    if progress {
+        println!(
+            "Adding {} Anki note(s) in batches of up to {}...",
+            pending.len(),
+            ANKI_BATCH_SIZE
+        );
+    }
+
+    let total = pending.len();
+    let mut done = 0usize;
+    for chunk in pending.chunks(ANKI_BATCH_SIZE) {
+        let notes: Vec<&AnkiNote> = chunk.iter().map(|item| &item.note).collect();
+        let ids = client.add_notes(&notes)?;
+        for (item, anki_id) in chunk.iter().zip(ids) {
+            state.insert(&item.note_id, &item.fp, anki_id);
+            state.set_hash(&item.note_id, &item.fp, item.hash.clone());
+        }
+        state.save()?;
+        done += chunk.len();
+        if count_as_added {
+            report.added += chunk.len();
+        }
+        if progress {
+            println!("[add]    {done}/{total} Anki note(s) added");
+        }
+    }
+    Ok(())
+}
+
+fn apply_update_batches(
+    client: &AnkiClient,
+    state: &mut SyncState,
+    report: &mut SyncReport,
+    created_decks: &mut HashSet<String>,
+    pending: Vec<PendingUpdate>,
+    progress: bool,
+) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    ensure_decks(
+        client,
+        created_decks,
+        pending.iter().map(|item| item.note.deck.as_str()),
+    )?;
+    if progress {
+        println!(
+            "Updating {} Anki note(s) in batches of up to {}...",
+            pending.len(),
+            ANKI_BATCH_SIZE
+        );
+    }
+
+    let total = pending.len();
+    let mut done = 0usize;
+    for chunk in pending.chunks(ANKI_BATCH_SIZE) {
+        let updates: Vec<(u64, &AnkiNote)> = chunk
+            .iter()
+            .map(|item| (item.anki_id, &item.note))
+            .collect();
+        let outcomes = client.update_notes(&updates)?;
+
+        let mut successful = Vec::new();
+        let mut readds = Vec::new();
+        for (item, outcome) in chunk.iter().zip(outcomes) {
+            match outcome {
+                None => successful.push(item),
+                Some(err) if is_note_not_found_message(&err) => {
+                    eprintln!(
+                        "bear-anki: note {} not found in Anki, re-adding",
+                        item.anki_id
+                    );
+                    readds.push(PendingAdd {
+                        note_id: item.note_id.clone(),
+                        fp: item.fp.clone(),
+                        hash: item.hash.clone(),
+                        note: item.note.clone(),
+                    });
+                }
+                Some(err) => return Err(anyhow::anyhow!("AnkiConnect update failed: {err}")),
+            }
+        }
+
+        let moves: Vec<(u64, &str)> = successful
+            .iter()
+            .map(|item| (item.anki_id, item.note.deck.as_str()))
+            .collect();
+        client.move_notes_to_decks(&moves)?;
+        for item in successful {
+            state.set_hash(&item.note_id, &item.fp, item.hash.clone());
+        }
+        if !readds.is_empty() {
+            apply_add_batches(client, state, report, created_decks, readds, false, false)?;
+        }
+        state.save()?;
+        done += chunk.len();
+        report.updated += chunk.len();
+        if progress {
+            println!("[update] {done}/{total} Anki note(s) updated");
+        }
+    }
+    Ok(())
+}
+
+fn ensure_decks<'a>(
+    client: &AnkiClient,
+    created_decks: &mut HashSet<String>,
+    decks: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    for deck in decks {
+        if created_decks.insert(deck.to_owned()) {
+            client.create_deck(deck)?;
+        }
+    }
+    Ok(())
 }
 
 fn fetch_images_cached<'a>(
@@ -465,8 +628,8 @@ fn card_preview(card: &Card) -> String {
     }
 }
 
-fn is_note_not_found(err: &anyhow::Error) -> bool {
-    let msg = err.to_string().to_lowercase();
+fn is_note_not_found_message(message: &str) -> bool {
+    let msg = message.to_lowercase();
     msg.contains("not found") || msg.contains("no note with id")
 }
 
