@@ -296,6 +296,7 @@ fn do_sync(anki_url: &str, cfg: &Config, force: bool) -> Result<SyncReport, Stri
             dry_run: false,
             force,
             verbose: false,
+            progress: false,
             config: cfg,
         },
     )

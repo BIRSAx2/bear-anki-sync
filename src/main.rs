@@ -85,10 +85,20 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Sync(cmd) => {
+            println!("Opening Bear database...");
             let store = sync::load_client()?;
+            println!("Loading sync state...");
             let mut state = SyncState::load()?;
 
+            println!("Checking AnkiConnect at {anki_url}...");
             client.check_connection()?;
+            if cmd.dry_run {
+                println!("Starting dry-run sync...");
+            } else if cmd.force {
+                println!("Starting force sync...");
+            } else {
+                println!("Starting incremental sync...");
+            }
 
             let report = sync::sync(
                 &store,
@@ -100,6 +110,7 @@ fn main() -> Result<()> {
                     dry_run: cmd.dry_run,
                     force: cmd.force,
                     verbose: cmd.verbose,
+                    progress: true,
                     config: &cfg,
                 },
             )?;

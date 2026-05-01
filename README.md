@@ -124,6 +124,12 @@ Within a Bear note, decks and cards carry explicit ordering metadata:
 
 Frontmatter `anki-deck` is treated as an exact deck path, so heading-order deck prefixes are not added when it is set.
 
+### Card context
+
+By default, cards under `##` or `###` headings show a small muted context pill above the Anki prompt. The context uses the unnumbered Bear heading path, for example `Cryptography / Symmetric Encryption`, while the normal card title remains unchanged below it.
+
+This uses inline HTML in the standard Anki `Basic` and `Cloze` fields, so no custom Anki note model is required. Disable it with `include_card_context = false` in the config file, or change the separator with `card_context_separator`.
+
 ### Frontmatter deck override
 
 To assign all cards in a note to a fixed deck regardless of headings, add `anki-deck` to YAML frontmatter at the very top of the note:
@@ -257,6 +263,10 @@ anki_url = "http://127.0.0.1:8765"
 
 # Auto-sync interval for the menu bar app (minutes). 0 or absent = disabled.
 sync_interval_minutes = 30
+
+# Show a small heading-context pill above synced card prompts.
+include_card_context = true
+card_context_separator = " / "
 
 # Map callout type → Anki tag. Unlisted types fall back to "bear-{type}".
 [tags]

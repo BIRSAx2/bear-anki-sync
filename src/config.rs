@@ -24,6 +24,12 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sync_interval_minutes: Option<u64>,
 
+    /// Show the Bear heading context above the card prompt in Anki.
+    pub include_card_context: bool,
+
+    /// Separator used when rendering nested context headings.
+    pub card_context_separator: String,
+
     /// Maps callout type (lowercase) → Anki tag.
     ///
     /// Example in config.toml:
@@ -40,6 +46,8 @@ impl Default for Config {
         Self {
             anki_url: None,
             sync_interval_minutes: None,
+            include_card_context: true,
+            card_context_separator: " / ".to_owned(),
             tags: default_tags(),
         }
     }
@@ -141,6 +149,8 @@ mod tests {
         let parsed: Config = toml::from_str(&text).unwrap();
 
         assert_eq!(parsed.anki_url.as_deref(), Some("http://localhost:9999"));
+        assert!(parsed.include_card_context);
+        assert_eq!(parsed.card_context_separator, " / ");
         assert_eq!(parsed.tag_for("important"), "must-know");
         assert_eq!(parsed.tag_for("note"), "bear-note"); // unchanged default
     }

@@ -24,6 +24,7 @@ pub struct SyncOptions<'a> {
     pub dry_run: bool,
     pub force: bool,
     pub verbose: bool,
+    pub progress: bool,
     pub config: &'a Config,
 }
 
@@ -75,6 +76,10 @@ pub fn sync(
     state: &mut SyncState,
     opts: &SyncOptions<'_>,
 ) -> Result<SyncReport> {
+    if opts.progress {
+        println!("Scanning Bear notes...");
+    }
+
     let mut notes = export_notes(store, opts.tag_filter)?;
 
     if let Some(title) = opts.note_filter {
@@ -102,6 +107,14 @@ pub fn sync(
         }
     }
 
+    if opts.progress {
+        println!(
+            "Found {} note(s), {} card(s) in sync scope.",
+            notes.len(),
+            current_order.len()
+        );
+    }
+
     // Images are read lazily per note. Hashing needs referenced media metadata,
     // but uploads only happen when rendering a real add/update.
     let mut note_image_cache: HashMap<String, Vec<NoteImage>> = HashMap::new();
@@ -116,7 +129,8 @@ pub fn sync(
         skipped: 0,
     };
 
-    for (note_id, fp) in &current_order {
+    let total_cards = current_order.len();
+    for (index, (note_id, fp)) in current_order.iter().enumerate() {
         let card = current
             .get(&(note_id.clone(), fp.clone()))
             .expect("ordered current card key should exist");
@@ -126,7 +140,8 @@ pub fn sync(
         let tags = build_tags(card, bear_tags, opts.config);
         let image_files = fetch_images_cached(&mut note_image_cache, store, note_id)?;
         let media_refs = card_referenced_images(card, image_files);
-        let hash = content_hash(card, &tags, &media_refs);
+        let context = card_context_label(card, opts.config);
+        let hash = content_hash(card, &tags, &media_refs, context.as_deref());
 
         if let Some(anki_id) = state.get(note_id, fp) {
             if !opts.force && state.get_hash(note_id, fp) == Some(hash.as_str()) {
@@ -145,7 +160,23 @@ pub fn sync(
                 continue;
             }
 
-            let anki_note = build_anki_note(card, image_files, tags, client, &mut upload_cache)?;
+            if opts.progress {
+                println!(
+                    "[update] {}/{} {} — {}",
+                    index + 1,
+                    total_cards,
+                    card.deck,
+                    card_preview(card)
+                );
+            }
+            let anki_note = build_anki_note(
+                card,
+                image_files,
+                tags,
+                client,
+                opts.config,
+                &mut upload_cache,
+            )?;
             client.create_deck(&card.deck)?;
             let update_result = client.update_note(anki_id, &anki_note.fields, &anki_note.tags);
             match update_result {
@@ -163,7 +194,7 @@ pub fn sync(
                 }
                 Err(err) => return Err(err),
             }
-            if opts.verbose {
+            if opts.verbose && !opts.progress {
                 println!("[update] {} — {}", card.deck, card_preview(card));
             }
             report.updated += 1;
@@ -178,13 +209,29 @@ pub fn sync(
                 continue;
             }
 
-            let anki_note = build_anki_note(card, image_files, tags, client, &mut upload_cache)?;
+            if opts.progress {
+                println!(
+                    "[add]    {}/{} {} — {}",
+                    index + 1,
+                    total_cards,
+                    card.deck,
+                    card_preview(card)
+                );
+            }
+            let anki_note = build_anki_note(
+                card,
+                image_files,
+                tags,
+                client,
+                opts.config,
+                &mut upload_cache,
+            )?;
             client.create_deck(&card.deck)?;
             let anki_id = client.add_note(&anki_note)?;
             state.insert(note_id, fp, anki_id);
             state.set_hash(note_id, fp, hash);
             state.save()?;
-            if opts.verbose {
+            if opts.verbose && !opts.progress {
                 println!("[add]    {} — {}", card.deck, card_preview(card));
             }
             report.added += 1;
@@ -209,6 +256,9 @@ pub fn sync(
         if opts.dry_run {
             println!("[dry-run] would delete {} Anki note(s)", ids.len());
         } else {
+            if opts.progress {
+                println!("[delete] {} stale Anki note(s)", ids.len());
+            }
             client.delete_notes(&ids)?;
             for (note_id, fp, _) in &stale {
                 state.remove(note_id, fp);
@@ -263,6 +313,7 @@ fn build_anki_note(
     image_files: &[NoteImage],
     tags: Vec<String>,
     client: &AnkiClient,
+    config: &Config,
     upload_cache: &mut HashMap<String, String>,
 ) -> Result<AnkiNote> {
     let note = match &card.kind {
@@ -272,9 +323,10 @@ fn build_anki_note(
             fields: [
                 (
                     "Front".to_owned(),
-                    with_sort_key_prefix(
+                    decorate_prompt_html(
                         render_for_anki(front, image_files, client, upload_cache)?,
-                        &card.sort_key,
+                        card,
+                        config,
                     ),
                 ),
                 (
@@ -290,9 +342,10 @@ fn build_anki_note(
             model: "Cloze".into(),
             fields: [(
                 "Text".to_owned(),
-                with_sort_key_prefix(
+                decorate_prompt_html(
                     render_for_anki(text, image_files, client, upload_cache)?,
-                    &card.sort_key,
+                    card,
+                    config,
                 ),
             )]
             .into(),
@@ -344,6 +397,31 @@ fn dedup_images(images: Vec<&NoteImage>) -> Vec<&NoteImage> {
     out
 }
 
+fn decorate_prompt_html(html: String, card: &Card, config: &Config) -> String {
+    let html = with_context_pill(html, card_context_label(card, config).as_deref());
+    with_sort_key_prefix(html, &card.sort_key)
+}
+
+fn card_context_label(card: &Card, config: &Config) -> Option<String> {
+    if !config.include_card_context || card.context.is_empty() {
+        return None;
+    }
+    Some(card.context.join(&config.card_context_separator))
+}
+
+fn with_context_pill(html: String, context: Option<&str>) -> String {
+    let Some(context) = context else {
+        return html;
+    };
+
+    let mut out = String::with_capacity(html.len() + context.len() + 220);
+    out.push_str("<div class=\"bear-anki-context\" style=\"display:inline-block;margin:0 0 0.65em 0;padding:0.18em 0.55em;border-radius:999px;background:#eef0f3;color:#5f6670;font-size:0.78em;font-weight:600;line-height:1.45;\">");
+    out.push_str(&escape_html_text(context));
+    out.push_str("</div>\n");
+    out.push_str(&html);
+    out
+}
+
 fn with_sort_key_prefix(html: String, sort_key: &str) -> String {
     let mut out = String::with_capacity(html.len() + sort_key.len() + 64);
     out.push_str("<span class=\"bear-anki-order\" style=\"display:none\">");
@@ -392,7 +470,12 @@ fn is_note_not_found(err: &anyhow::Error) -> bool {
     msg.contains("not found") || msg.contains("no note with id")
 }
 
-fn content_hash(card: &Card, tags: &[String], images: &[&NoteImage]) -> String {
+fn content_hash(
+    card: &Card,
+    tags: &[String],
+    images: &[&NoteImage],
+    context: Option<&str>,
+) -> String {
     let mut h = Sha256::new();
     h.update(card.deck.as_bytes());
     h.update(b"\0");
@@ -415,6 +498,10 @@ fn content_hash(card: &Card, tags: &[String], images: &[&NoteImage]) -> String {
         h.update(tag.as_bytes());
         h.update(b"\0");
     }
+    h.update(b"\0context\0");
+    if let Some(context) = context {
+        h.update(context.as_bytes());
+    }
     h.update(b"\0images\0");
     for image in images {
         h.update(image.filename.as_bytes());
@@ -431,7 +518,10 @@ fn content_hash(card: &Card, tags: &[String], images: &[&NoteImage]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_tags, card_referenced_images, content_hash, with_sort_key_prefix};
+    use super::{
+        build_tags, card_context_label, card_referenced_images, content_hash, decorate_prompt_html,
+        with_sort_key_prefix,
+    };
     use crate::config::Config;
     use crate::parser::{Card, CardKind};
     use crate::render::NoteImage;
@@ -446,6 +536,7 @@ mod tests {
             fingerprint: "fingerprint".into(),
             callout_type: "card".into(),
             sort_key: sort_key.into(),
+            context: vec![],
         }
     }
 
@@ -462,8 +553,8 @@ mod tests {
     fn content_hash_changes_when_source_order_changes() {
         let tags = vec!["bear-card".to_owned()];
         assert_ne!(
-            content_hash(&make_card("000001"), &tags, &[]),
-            content_hash(&make_card("000002"), &tags, &[])
+            content_hash(&make_card("000001"), &tags, &[], None),
+            content_hash(&make_card("000002"), &tags, &[], None)
         );
     }
 
@@ -471,8 +562,13 @@ mod tests {
     fn content_hash_changes_when_tags_change() {
         let card = make_card("000001");
         assert_ne!(
-            content_hash(&card, &["bear-card".to_owned()], &[]),
-            content_hash(&card, &["bear-card".to_owned(), "topic".to_owned()], &[])
+            content_hash(&card, &["bear-card".to_owned()], &[], None),
+            content_hash(
+                &card,
+                &["bear-card".to_owned(), "topic".to_owned()],
+                &[],
+                None
+            )
         );
     }
 
@@ -492,8 +588,54 @@ mod tests {
         let refs_b = card_referenced_images(&card, std::slice::from_ref(&image_b));
 
         assert_ne!(
-            content_hash(&card, &tags, &refs_a),
-            content_hash(&card, &tags, &refs_b)
+            content_hash(&card, &tags, &refs_a, None),
+            content_hash(&card, &tags, &refs_b, None)
+        );
+    }
+
+    #[test]
+    fn context_label_uses_configured_separator() {
+        let mut card = make_card("000001");
+        card.context = vec!["Subtitle".into(), "Topic".into()];
+        let config = Config::default();
+
+        assert_eq!(
+            card_context_label(&card, &config).as_deref(),
+            Some("Subtitle / Topic")
+        );
+    }
+
+    #[test]
+    fn context_can_be_disabled() {
+        let mut card = make_card("000001");
+        card.context = vec!["Subtitle".into()];
+        let config = Config {
+            include_card_context: false,
+            ..Config::default()
+        };
+
+        assert_eq!(card_context_label(&card, &config), None);
+    }
+
+    #[test]
+    fn decorate_prompt_html_renders_hidden_order_then_visible_context() {
+        let mut card = make_card("000001");
+        card.context = vec!["Subtitle".into()];
+        let html = decorate_prompt_html("<p>Front</p>\n".to_owned(), &card, &Config::default());
+
+        assert!(html.starts_with("<span class=\"bear-anki-order\" style=\"display:none\">"));
+        assert!(html.contains("class=\"bear-anki-context\""));
+        assert!(html.contains(">Subtitle</div>\n<p>Front</p>"));
+    }
+
+    #[test]
+    fn content_hash_changes_when_context_changes() {
+        let tags = vec!["bear-card".to_owned()];
+        let card = make_card("000001");
+
+        assert_ne!(
+            content_hash(&card, &tags, &[], Some("Subtitle")),
+            content_hash(&card, &tags, &[], Some("Other Subtitle"))
         );
     }
 

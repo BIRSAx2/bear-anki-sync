@@ -18,6 +18,7 @@ pub struct Card {
     pub fingerprint: String,
     pub callout_type: String, // "card", "tip", "note", "important"
     pub sort_key: String,
+    pub context: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,9 +169,12 @@ pub fn parse_cards(note: &BearNote) -> Vec<Card> {
             let deck = deck_override
                 .clone()
                 .unwrap_or_else(|| build_deck(&h1, h2.as_ref(), h3.as_ref()));
+            let context = build_context(h2.as_ref(), h3.as_ref());
 
             let sort_key = (card_ordinal + 1).to_string();
-            if let Some(card) = classify_card(title, body_lines, deck, callout_type, sort_key) {
+            if let Some(card) =
+                classify_card(title, body_lines, deck, callout_type, sort_key, context)
+            {
                 card_ordinal += 1;
                 cards.push(card);
             } else {
@@ -341,6 +345,7 @@ fn classify_card(
     deck: String,
     callout_type: String,
     sort_key: String,
+    context: Vec<String>,
 ) -> Option<Card> {
     let has_cloze = body_lines.iter().any(|line| line.contains("{{"));
 
@@ -354,6 +359,7 @@ fn classify_card(
             fingerprint: fp,
             callout_type,
             sort_key,
+            context,
         });
     }
 
@@ -366,6 +372,7 @@ fn classify_card(
             fingerprint: fp,
             callout_type,
             sort_key,
+            context,
         });
     }
 
@@ -384,6 +391,7 @@ fn classify_card(
             fingerprint: fp,
             callout_type,
             sort_key,
+            context,
         });
     }
 
@@ -412,6 +420,17 @@ fn build_deck(h1: &str, h2: Option<&HeadingLevel>, h3: Option<&HeadingLevel>) ->
         parts.push(ordered_heading(h));
     }
     parts.join("::")
+}
+
+fn build_context(h2: Option<&HeadingLevel>, h3: Option<&HeadingLevel>) -> Vec<String> {
+    let mut context = Vec::new();
+    if let Some(h) = h2 {
+        context.push(h.title.clone());
+    }
+    if let Some(h) = h3 {
+        context.push(h.title.clone());
+    }
+    context
 }
 
 fn ordered_heading(heading: &HeadingLevel) -> String {
@@ -581,6 +600,7 @@ mod tests {
         );
         let cards = parse_cards(&note);
         assert_eq!(cards[0].deck, "System Security::1.Chapter 1::1.Topic A");
+        assert_eq!(cards[0].context, vec!["Chapter 1", "Topic A"]);
     }
 
     #[test]
@@ -608,6 +628,7 @@ mod tests {
         let note = make_note("System Security", "# System Security\n\n> [!CARD] Q?\n> A.");
         let cards = parse_cards(&note);
         assert_eq!(cards[0].deck, "System Security");
+        assert!(cards[0].context.is_empty());
     }
 
     #[test]
